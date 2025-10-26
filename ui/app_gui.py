@@ -8,7 +8,6 @@ from tkinter import filedialog, messagebox
 
 from core.utils import ensure_ffmpeg_or_die, default_download_dir, human_time, DEFAULT_BITRATE
 from core.downloader import YTAudioDownloader, DownloadProgress
-from PIL import Image
 
 
 # Color theme
