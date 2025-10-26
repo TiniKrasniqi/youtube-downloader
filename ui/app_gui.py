@@ -153,9 +153,10 @@ class DownloadList(ctk.CTkScrollableFrame):
         super().__init__(master, corner_radius=12, fg_color="#101010", **kwargs)
         self.grid_columnconfigure(0, weight=1)
         self._rows: Dict[str, DownloadRow] = {}
+        self._placeholder_text = "No downloads yet. Paste a link to begin."
         self._empty_label = ctk.CTkLabel(
             self,
-            text="No downloads yet. Paste a link to begin.",
+            text=self._placeholder_text,
             text_color="#6f6f6f",
             font=("Segoe UI", 13),
             anchor="w",
@@ -168,6 +169,12 @@ class DownloadList(ctk.CTkScrollableFrame):
         self._rows.clear()
         self._show_placeholder()
 
+    def set_placeholder_text(self, text: str, show: bool = False):
+        self._placeholder_text = text
+        self._empty_label.configure(text=text)
+        if show:
+            self._show_placeholder()
+
     def _show_placeholder(self):
         self._empty_label.grid(row=0, column=0, sticky="w", padx=16, pady=(12, 12))
 
@@ -178,6 +185,9 @@ class DownloadList(ctk.CTkScrollableFrame):
         if prog.item_index is not None:
             return f"item-{prog.item_index:04d}"
         return "single"
+
+    def has_rows(self) -> bool:
+        return bool(self._rows)
 
     def _ensure_row(self, prog: DownloadProgress) -> DownloadRow:
         key = self._key_for(prog)
@@ -319,20 +329,6 @@ class App(ctk.CTk):
         )
         self.quality_menu.pack(side="left", padx=(8, 0))
 
-        # Progress bar
-        self.progress_var = ctk.DoubleVar(value=0)
-        self.progress_bar = ctk.CTkProgressBar(self, variable=self.progress_var, width=700, height=12)
-        self.progress_bar.pack(pady=(20, 6))
-        self.progress_bar.set(0)
-
-        # Progress info
-        info_frame = ctk.CTkFrame(self, fg_color="transparent")
-        info_frame.pack(pady=(0, 10), fill="x")
-        self.percent_label = ctk.CTkLabel(info_frame, text="0%", font=("Segoe UI", 13))
-        self.percent_label.pack(side="left", padx=(90, 0))
-        self.eta_label = ctk.CTkLabel(info_frame, text="ETA: —", font=("Segoe UI", 13))
-        self.eta_label.pack(side="right", padx=(0, 90))
-
         # Activity + download list
         downloads_card = ctk.CTkFrame(self, fg_color="#111111", corner_radius=14)
         downloads_card.pack(pady=(10, 12), padx=30, fill="both", expand=True)
@@ -404,12 +400,10 @@ class App(ctk.CTk):
         self._clear_activity()
         self._log(f"[{human_time()}] 🚀 Starting download…")
         self.stop_event.clear()
-        self.progress_bar.set(0)
-        self.progress_var.set(0)
-        self.percent_label.configure(text="0%")
         self.download_list.reset()
+        self.download_list.set_placeholder_text("Fetching data…", show=True)
         self._current_total_items = None
-        self.jobs_title_var.set("Preparing download…")
+        self.jobs_title_var.set("Fetching data…")
 
         if format_choice == "Audio":
             bitrate = AUDIO_QUALITIES.get(quality_choice, DEFAULT_BITRATE)
@@ -528,28 +522,18 @@ class App(ctk.CTk):
                 elif self._current_total_items is None and prog.title:
                     self.jobs_title_var.set("Single track")
 
-                if prog.status == "downloading":
-                    pct = max(0, min(100, prog.percent or 0))
-                    self.progress_var.set(pct / 100)
-                    self.percent_label.configure(text=f"{pct:.1f}%")
-                    if prog.eta:
-                        self.eta_label.configure(text=f"ETA: {int(prog.eta)}s")
-                elif prog.status == "finished":
+                if prog.status == "finished":
                     if prog.message == "all_done":
-                        self.progress_bar.set(1)
-                        self.percent_label.configure(text="100%")
-                        self.eta_label.configure(text="ETA: —")
                         self.download_list.mark_all_inactive()
-                        self.jobs_title_var.set("Completed")
-                    elif prog.message == "postprocessing":
-                        self.eta_label.configure(text="ETA: —")
+                        self.jobs_title_var.set("Download Completed")
+                        if not self.download_list.has_rows():
+                            self.download_list.set_placeholder_text("Download completed.", show=True)
                 elif prog.status in ("stopped", "error"):
                     if prog.status == "stopped":
                         self.jobs_title_var.set("Stopped")
                         self.download_list.mark_all_inactive()
                     if prog.status == "error":
                         self.jobs_title_var.set("Error during download")
-                    self.eta_label.configure(text="ETA: —")
         except queue.Empty:
             pass
         finally:
