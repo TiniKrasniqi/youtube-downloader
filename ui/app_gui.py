@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 import threading
 import queue
-import io
-import urllib.request
-from typing import Dict, Optional, Set
+from typing import Dict, Optional
 
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
@@ -34,78 +32,56 @@ VIDEO_QUALITIES = ["480p", "720p", "1080p", "1440p", "2160p (4K)"]
 
 class DownloadRow(ctk.CTkFrame):
     def __init__(self, master, title: str, item_index: Optional[int] = None, item_count: Optional[int] = None):
-        super().__init__(master, corner_radius=12, fg_color=ROW_BG)
-        self.grid_columnconfigure(1, weight=1)
+        super().__init__(master, corner_radius=10, fg_color=ROW_BG)
+        self.columnconfigure(1, weight=1)
 
         self._item_index = item_index
         self._item_count = item_count
         self._title = title or "Preparing…"
         self._active = False
-        self._thumb_image = None
 
-        self.thumb_label = ctk.CTkLabel(
-            self,
-            text="♪",
-            width=72,
-            height=72,
-            font=("Segoe UI", 26, "bold"),
-            fg_color="#0f0f0f",
-            corner_radius=10,
-        )
-        self.thumb_label.grid(row=0, column=0, rowspan=3, padx=(16, 18), pady=12)
+        index_text = self._format_index()
+        self.index_label = ctk.CTkLabel(self, text=index_text, width=60, anchor="w", font=("Segoe UI", 13, "bold"))
+        self.index_label.grid(row=0, column=0, padx=(14, 8), pady=(10, 0), sticky="w")
 
-        self.title_label = ctk.CTkLabel(
-            self,
-            text=self._title,
-            anchor="w",
-            font=("Segoe UI", 15, "bold"),
-            wraplength=460,
-        )
-        self.title_label.grid(row=0, column=1, pady=(16, 0), sticky="w")
+        self.title_label = ctk.CTkLabel(self, text=self._title, anchor="w", font=("Segoe UI", 15, "bold"))
+        self.title_label.grid(row=0, column=1, pady=(10, 0), sticky="w")
 
         self.percent_label = ctk.CTkLabel(self, text="0%", anchor="e", font=("Segoe UI", 13))
-        self.percent_label.grid(row=0, column=2, padx=(8, 16), pady=(16, 0), sticky="e")
+        self.percent_label.grid(row=0, column=2, padx=(8, 16), pady=(10, 0), sticky="e")
 
         self.progress_var = ctk.DoubleVar(value=0)
         self.progress_bar = ctk.CTkProgressBar(self, variable=self.progress_var, height=10)
-        self.progress_bar.grid(row=1, column=1, columnspan=2, padx=(0, 16), pady=(6, 4), sticky="ew")
+        self.progress_bar.grid(row=1, column=0, columnspan=3, padx=16, pady=(6, 4), sticky="ew")
 
         self.status_label = ctk.CTkLabel(
             self,
-            text=self._format_meta(),
+            text="Waiting…",
             anchor="w",
             font=("Segoe UI", 12),
             text_color="#b0b0b0",
         )
-        self.status_label.grid(row=2, column=1, columnspan=2, padx=(0, 16), pady=(0, 14), sticky="w")
+        self.status_label.grid(row=2, column=0, columnspan=3, padx=16, pady=(0, 12), sticky="w")
 
     # ------------------------------------------------------------
-    def _format_meta(self) -> str:
-        if self._item_index and self._item_count:
-            return f"Track {self._item_index} of {self._item_count}"
-        if self._item_index:
-            return f"Track {self._item_index}"
+    def _format_index(self) -> str:
+        if self._item_index is None:
+            return "•"
         if self._item_count:
-            return f"{self._item_count} tracks"
-        return "Waiting…"
+            return f"{self._item_index}/{self._item_count}"
+        return f"#{self._item_index}"
 
     def update_meta(self, item_index: Optional[int], item_count: Optional[int]):
         if item_index is not None:
             self._item_index = item_index
         if item_count:
             self._item_count = item_count
+        self.index_label.configure(text=self._format_index())
 
     def set_title(self, title: str):
         if title and title != self._title:
             self._title = title
             self.title_label.configure(text=title)
-
-    def set_thumbnail(self, image: Optional[ctk.CTkImage]):
-        self._thumb_image = image
-        if image:
-            self.thumb_label.configure(image=image, text="")
-        else:
-            self.thumb_label.configure(image=None, text="♪")
 
     def set_active(self, active: bool):
         if self._active == active:
@@ -132,22 +108,21 @@ class DownloadRow(ctk.CTkFrame):
         if prog.percent is not None:
             clamped = max(0.0, min(100.0, float(prog.percent)))
             self.progress_var.set(clamped / 100.0)
-            self.percent_label.configure(text=f"{clamped:.0f}%")
+            self.percent_label.configure(text=f"{clamped:.1f}%")
 
-        status_text = self._format_meta()
+        status_text = ""
         text_color = "#b0b0b0"
 
         if prog.status == "downloading":
-            details = []
+            status_parts = []
+            if prog.percent:
+                status_parts.append(f"{prog.percent:.1f}%")
             if prog.eta:
-                details.append(f"ETA {int(prog.eta)}s")
+                status_parts.append(f"ETA {int(prog.eta)}s")
             if prog.speed:
                 kb = prog.speed / 1024
-                details.append(f"{kb:,.0f} KB/s")
-            if details:
-                status_text = f"{status_text} • {' • '.join(details)}" if status_text else " • ".join(details)
-            elif not status_text:
-                status_text = "Downloading…"
+                status_parts.append(f"{kb:,.0f} KB/s")
+            status_text = " • ".join(status_parts) or "Downloading…"
             text_color = "#cfd8dc"
 
         elif prog.status == "finished":
@@ -170,7 +145,8 @@ class DownloadRow(ctk.CTkFrame):
             text_color = "#ff9d9d"
             self.mark_error()
 
-        self.status_label.configure(text=status_text or "", text_color=text_color)
+        if status_text:
+            self.status_label.configure(text=status_text, text_color=text_color)
 
 
 class DownloadList(ctk.CTkScrollableFrame):
@@ -178,8 +154,6 @@ class DownloadList(ctk.CTkScrollableFrame):
         super().__init__(master, corner_radius=12, fg_color="#101010", **kwargs)
         self.grid_columnconfigure(0, weight=1)
         self._rows: Dict[str, DownloadRow] = {}
-        self._thumb_cache: Dict[str, Optional[ctk.CTkImage]] = {}
-        self._thumb_loading: Set[str] = set()
         self._empty_label = ctk.CTkLabel(
             self,
             text="No downloads yet. Paste a link to begin.",
@@ -217,41 +191,6 @@ class DownloadList(ctk.CTkScrollableFrame):
             self._rows[key] = row
         return row
 
-    def _apply_thumbnail(self, row: DownloadRow, url: str):
-        if not url:
-            return
-        if url in self._thumb_cache:
-            cached = self._thumb_cache[url]
-            if isinstance(cached, ctk.CTkImage):
-                row.set_thumbnail(cached)
-            return
-        if url in self._thumb_loading:
-            return
-
-        def finish(image: Optional[ctk.CTkImage]):
-            if image:
-                self._thumb_cache[url] = image
-                if row.winfo_exists():
-                    row.set_thumbnail(image)
-            else:
-                self._thumb_cache[url] = None
-
-        def worker():
-            try:
-                with urllib.request.urlopen(url, timeout=10) as resp:
-                    data = resp.read()
-                image = Image.open(io.BytesIO(data)).convert("RGB")
-                image.thumbnail((200, 200))
-                thumb = ctk.CTkImage(light_image=image, dark_image=image, size=(72, 72))
-            except Exception:
-                thumb = None
-            finally:
-                self.after(0, lambda: finish(thumb))
-                self.after(0, lambda: self._thumb_loading.discard(url))
-
-        self._thumb_loading.add(url)
-        threading.Thread(target=worker, daemon=True).start()
-
     def update_from_progress(self, prog: DownloadProgress):
         if prog.message == "all_done":
             if not self._rows:
@@ -262,8 +201,6 @@ class DownloadList(ctk.CTkScrollableFrame):
             return
 
         row = self._ensure_row(prog)
-        if prog.thumbnail:
-            self._apply_thumbnail(row, prog.thumbnail)
         if prog.status == "downloading":
             for key, other_row in self._rows.items():
                 other_row.set_active(other_row is row)
@@ -297,6 +234,7 @@ class App(ctk.CTk):
         self.stop_event = threading.Event()
         self.log_queue = queue.Queue()
         self.progress_queue = queue.Queue()
+        self.activity_history = []
         self._current_total_items: Optional[int] = None
 
         # UI build
@@ -401,25 +339,21 @@ class App(ctk.CTk):
         downloads_card.pack(pady=(10, 12), padx=30, fill="both", expand=True)
 
         header_row = ctk.CTkFrame(downloads_card, fg_color="transparent")
-        header_row.pack(fill="x", padx=18, pady=(16, 6))
+        header_row.pack(fill="x", padx=18, pady=(16, 8))
 
         self.jobs_title_var = ctk.StringVar(value="Waiting for downloads")
         jobs_title = ctk.CTkLabel(header_row, textvariable=self.jobs_title_var, font=("Segoe UI", 17, "bold"))
         jobs_title.pack(side="left")
 
-        self.header_message_var = ctk.StringVar(value="Ready")
-        header_message = ctk.CTkLabel(
+        self.activity_label = ctk.CTkLabel(
             header_row,
-            textvariable=self.header_message_var,
+            text="Ready",
             font=("Segoe UI", 12),
             text_color="#9ba0a5",
+            justify="right",
             anchor="e",
         )
-        header_message.pack(side="right")
-
-        header_border = ctk.CTkFrame(downloads_card, fg_color="#1d1d1d", height=1)
-        header_border.pack(fill="x", padx=18, pady=(0, 10))
-        header_border.pack_propagate(False)
+        self.activity_label.pack(side="right")
 
         self.download_list = DownloadList(downloads_card, width=780, height=260)
         self.download_list.pack(fill="both", expand=True, padx=16, pady=(0, 18))
@@ -563,13 +497,18 @@ class App(ctk.CTk):
         return cleaned
 
     def _clear_activity(self, message: str = "Ready"):
-        self.header_message_var.set(message)
+        self.activity_history = []
+        self.activity_label.configure(text=message)
 
     def _add_activity_line(self, text: str):
         clean = self._format_log_line(text)
         if not clean:
             return
-        self.header_message_var.set(clean)
+        self.activity_history.append(clean)
+        if len(self.activity_history) > 4:
+            self.activity_history = self.activity_history[-4:]
+        joined = "\n".join(self.activity_history)
+        self.activity_label.configure(text=joined or "Ready")
 
     def _drain_log_queue(self):
         try:
