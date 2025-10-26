@@ -20,6 +20,9 @@ class DownloadProgress:
     speed: float = 0.0       # bytes/sec
     eta: Optional[int] = None
     message: str = ""
+    title: str = ""
+    item_index: Optional[int] = None
+    item_count: Optional[int] = None
 
 
 class YTDLogger:
@@ -44,12 +47,25 @@ class YTAudioDownloader:
         self.log = log_cb
         self.progress = progress_cb
         self.stop_event = stop_event
+        self._last_title: str = ""
+        self._last_item_index: Optional[int] = None
+        self._last_item_count: Optional[int] = None
 
     def _progress_hook(self, d):
         if self.stop_event.is_set():
             raise DownloadCancelled("User requested stop.")
 
         status = d.get("status")
+        info = d.get("info_dict") or {}
+        title = info.get("track") or info.get("title") or info.get("alt_title") or info.get("id") or ""
+        playlist_index = info.get("playlist_index")
+        playlist_count = (
+            info.get("playlist_count")
+            or info.get("n_entries")
+            or d.get("playlist_count")
+            or d.get("n_entries")
+        )
+
         if status == "downloading":
             speed = d.get("speed") or 0.0
             eta = d.get("eta")
@@ -57,19 +73,37 @@ class YTAudioDownloader:
             downloaded = d.get("downloaded_bytes") or 0
             pct = (downloaded / total * 100.0) if total else 0.0
 
-            self.progress(DownloadProgress(
+            progress = DownloadProgress(
                 status="downloading",
                 percent=pct,
                 downloaded=int(downloaded),
                 total=int(total),
                 speed=float(speed),
                 eta=eta,
-                message="downloading"
-            ))
+                message="downloading",
+                title=title,
+                item_index=int(playlist_index) if playlist_index is not None else None,
+                item_count=int(playlist_count) if playlist_count else None,
+            )
+            self._last_title = progress.title
+            self._last_item_index = progress.item_index
+            self._last_item_count = progress.item_count
+            self.progress(progress)
 
         elif status == "finished":
             self.log(f"[{human_time()}] ✅ Downloaded; converting…")
-            self.progress(DownloadProgress(status="finished", message="postprocessing"))
+            progress = DownloadProgress(
+                status="finished",
+                message="postprocessing",
+                percent=100.0,
+                title=title,
+                item_index=int(playlist_index) if playlist_index is not None else None,
+                item_count=int(playlist_count) if playlist_count else None,
+            )
+            self._last_title = progress.title
+            self._last_item_index = progress.item_index
+            self._last_item_count = progress.item_count
+            self.progress(progress)
 
     def _build_outtmpl(self, url: str, out_dir: str) -> str:
         # Auto-select template based on URL heuristics (no UI toggle needed)
@@ -115,7 +149,14 @@ class YTAudioDownloader:
                 ydl.download([url])
             if not self.stop_event.is_set():
                 self.log(f"[{human_time()}] 🎵 Finished successfully.")
-                self.progress(DownloadProgress(status="finished", message="done", percent=100.0))
+                self.progress(DownloadProgress(
+                    status="finished",
+                    message="all_done",
+                    percent=100.0,
+                    title=self._last_title,
+                    item_index=self._last_item_index,
+                    item_count=self._last_item_count,
+                ))
 
         except DownloadCancelled as e:
             self.log(f"[{human_time()}] ⏹ Stopped: {e}")
@@ -139,7 +180,14 @@ class YTAudioDownloader:
                 ydl.download([url])
             if not self.stop_event.is_set():
                 self.log(f"[{human_time()}] 🎥 Finished successfully.")
-                self.progress(DownloadProgress(status="finished", message="done", percent=100.0))
+                self.progress(DownloadProgress(
+                    status="finished",
+                    message="all_done",
+                    percent=100.0,
+                    title=self._last_title,
+                    item_index=self._last_item_index,
+                    item_count=self._last_item_count,
+                ))
         except DownloadCancelled as e:
             self.log(f"[{human_time()}] ⏹ Stopped: {e}")
             self.progress(DownloadProgress(status="stopped", message=str(e)))
