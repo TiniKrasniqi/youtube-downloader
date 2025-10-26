@@ -338,21 +338,14 @@ class App(ctk.CTk):
         downloads_card.pack(pady=(10, 12), padx=30, fill="both", expand=True)
 
         header_row = ctk.CTkFrame(downloads_card, fg_color="transparent")
-        header_row.pack(fill="x", padx=18, pady=(16, 8))
+        header_row.pack(fill="x", padx=16, pady=(16, 8))
 
         self.jobs_title_var = ctk.StringVar(value="Waiting for downloads")
         jobs_title = ctk.CTkLabel(header_row, textvariable=self.jobs_title_var, font=("Segoe UI", 17, "bold"))
         jobs_title.pack(side="left")
 
-        self.activity_label = ctk.CTkLabel(
-            header_row,
-            text="Ready",
-            font=("Segoe UI", 12),
-            text_color="#9ba0a5",
-            justify="right",
-            anchor="e",
-        )
-        self.activity_label.pack(side="right")
+        header_divider = ctk.CTkFrame(downloads_card, height=2, fg_color="#1f1f1f")
+        header_divider.pack(fill="x", padx=16, pady=(0, 12))
 
         self.download_list = DownloadList(downloads_card, width=780, height=260)
         self.download_list.pack(fill="both", expand=True, padx=16, pady=(0, 18))
@@ -497,7 +490,6 @@ class App(ctk.CTk):
 
     def _clear_activity(self, message: str = "Ready"):
         self.activity_history = []
-        self.activity_label.configure(text=message)
 
     def _add_activity_line(self, text: str):
         clean = self._format_log_line(text)
@@ -506,8 +498,6 @@ class App(ctk.CTk):
         self.activity_history.append(clean)
         if len(self.activity_history) > 4:
             self.activity_history = self.activity_history[-4:]
-        joined = "\n".join(self.activity_history)
-        self.activity_label.configure(text=joined or "Ready")
 
     def _drain_log_queue(self):
         try:
