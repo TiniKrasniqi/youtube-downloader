@@ -1,12 +1,16 @@
 # -*- coding: utf-8 -*-
-import os
 import threading
 import queue
+import io
+import urllib.request
+from typing import Dict, Optional, Set
+
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 
 from core.utils import ensure_ffmpeg_or_die, default_download_dir, human_time, DEFAULT_BITRATE
 from core.downloader import YTAudioDownloader, DownloadProgress
+from PIL import Image
 
 
 # Color theme
@@ -14,6 +18,9 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("green")  # or "dark-blue", "green", "blue"
 
 ACCENT = "#00c896"
+ROW_BG = "#151515"
+ROW_ACTIVE_BG = "#1f2a24"
+ROW_ERROR_BG = "#2a1515"
 
 AUDIO_QUALITIES = {
     "128 kbps": "128",
@@ -23,6 +30,255 @@ AUDIO_QUALITIES = {
 }
 
 VIDEO_QUALITIES = ["480p", "720p", "1080p", "1440p", "2160p (4K)"]
+
+
+class DownloadRow(ctk.CTkFrame):
+    def __init__(self, master, title: str, item_index: Optional[int] = None, item_count: Optional[int] = None):
+        super().__init__(master, corner_radius=12, fg_color=ROW_BG)
+        self.grid_columnconfigure(1, weight=1)
+
+        self._item_index = item_index
+        self._item_count = item_count
+        self._title = title or "Preparing…"
+        self._active = False
+        self._thumb_image = None
+
+        self.thumb_label = ctk.CTkLabel(
+            self,
+            text="♪",
+            width=72,
+            height=72,
+            font=("Segoe UI", 26, "bold"),
+            fg_color="#0f0f0f",
+            corner_radius=10,
+        )
+        self.thumb_label.grid(row=0, column=0, rowspan=3, padx=(16, 18), pady=12)
+
+        self.title_label = ctk.CTkLabel(
+            self,
+            text=self._title,
+            anchor="w",
+            font=("Segoe UI", 15, "bold"),
+            wraplength=460,
+        )
+        self.title_label.grid(row=0, column=1, pady=(16, 0), sticky="w")
+
+        self.percent_label = ctk.CTkLabel(self, text="0%", anchor="e", font=("Segoe UI", 13))
+        self.percent_label.grid(row=0, column=2, padx=(8, 16), pady=(16, 0), sticky="e")
+
+        self.progress_var = ctk.DoubleVar(value=0)
+        self.progress_bar = ctk.CTkProgressBar(self, variable=self.progress_var, height=10)
+        self.progress_bar.grid(row=1, column=1, columnspan=2, padx=(0, 16), pady=(6, 4), sticky="ew")
+
+        self.status_label = ctk.CTkLabel(
+            self,
+            text=self._format_meta(),
+            anchor="w",
+            font=("Segoe UI", 12),
+            text_color="#b0b0b0",
+        )
+        self.status_label.grid(row=2, column=1, columnspan=2, padx=(0, 16), pady=(0, 14), sticky="w")
+
+    # ------------------------------------------------------------
+    def _format_meta(self) -> str:
+        if self._item_index and self._item_count:
+            return f"Track {self._item_index} of {self._item_count}"
+        if self._item_index:
+            return f"Track {self._item_index}"
+        if self._item_count:
+            return f"{self._item_count} tracks"
+        return "Waiting…"
+
+    def update_meta(self, item_index: Optional[int], item_count: Optional[int]):
+        if item_index is not None:
+            self._item_index = item_index
+        if item_count:
+            self._item_count = item_count
+
+    def set_title(self, title: str):
+        if title and title != self._title:
+            self._title = title
+            self.title_label.configure(text=title)
+
+    def set_thumbnail(self, image: Optional[ctk.CTkImage]):
+        self._thumb_image = image
+        if image:
+            self.thumb_label.configure(image=image, text="")
+        else:
+            self.thumb_label.configure(image=None, text="♪")
+
+    def set_active(self, active: bool):
+        if self._active == active:
+            return
+        self._active = active
+        self.configure(fg_color=ROW_ACTIVE_BG if active else ROW_BG)
+
+    def mark_error(self):
+        self.configure(fg_color=ROW_ERROR_BG)
+        self.status_label.configure(text_color="#ff9d9d")
+
+    def mark_complete(self, label: str = "Complete"):
+        self.progress_var.set(1.0)
+        self.percent_label.configure(text="100%")
+        self.status_label.configure(text=label, text_color=ACCENT)
+        self.set_active(False)
+
+    def update_progress(self, prog: DownloadProgress):
+        if prog.item_index is not None or prog.item_count:
+            self.update_meta(prog.item_index, prog.item_count)
+        if prog.title:
+            self.set_title(prog.title)
+
+        if prog.percent is not None:
+            clamped = max(0.0, min(100.0, float(prog.percent)))
+            self.progress_var.set(clamped / 100.0)
+            self.percent_label.configure(text=f"{clamped:.0f}%")
+
+        status_text = self._format_meta()
+        text_color = "#b0b0b0"
+
+        if prog.status == "downloading":
+            details = []
+            if prog.eta:
+                details.append(f"ETA {int(prog.eta)}s")
+            if prog.speed:
+                kb = prog.speed / 1024
+                details.append(f"{kb:,.0f} KB/s")
+            if details:
+                status_text = f"{status_text} • {' • '.join(details)}" if status_text else " • ".join(details)
+            elif not status_text:
+                status_text = "Downloading…"
+            text_color = "#cfd8dc"
+
+        elif prog.status == "finished":
+            if prog.message == "postprocessing":
+                status_text = "Converting…"
+                text_color = "#cfd8dc"
+            elif prog.message == "all_done":
+                self.mark_complete("Complete")
+                return
+            else:
+                self.mark_complete("Finished")
+                return
+
+        elif prog.status == "stopped":
+            status_text = prog.message or "Stopped"
+            text_color = "#ffcc80"
+
+        elif prog.status == "error":
+            status_text = prog.message or "Error"
+            text_color = "#ff9d9d"
+            self.mark_error()
+
+        self.status_label.configure(text=status_text or "", text_color=text_color)
+
+
+class DownloadList(ctk.CTkScrollableFrame):
+    def __init__(self, master, **kwargs):
+        super().__init__(master, corner_radius=12, fg_color="#101010", **kwargs)
+        self.grid_columnconfigure(0, weight=1)
+        self._rows: Dict[str, DownloadRow] = {}
+        self._thumb_cache: Dict[str, Optional[ctk.CTkImage]] = {}
+        self._thumb_loading: Set[str] = set()
+        self._empty_label = ctk.CTkLabel(
+            self,
+            text="No downloads yet. Paste a link to begin.",
+            text_color="#6f6f6f",
+            font=("Segoe UI", 13),
+            anchor="w",
+        )
+        self._empty_label.grid(row=0, column=0, sticky="w", padx=16, pady=(12, 12))
+
+    def reset(self):
+        for row in self._rows.values():
+            row.destroy()
+        self._rows.clear()
+        self._show_placeholder()
+
+    def _show_placeholder(self):
+        self._empty_label.grid(row=0, column=0, sticky="w", padx=16, pady=(12, 12))
+
+    def _hide_placeholder(self):
+        self._empty_label.grid_forget()
+
+    def _key_for(self, prog: DownloadProgress) -> str:
+        if prog.item_index is not None:
+            return f"item-{prog.item_index:04d}"
+        return "single"
+
+    def _ensure_row(self, prog: DownloadProgress) -> DownloadRow:
+        key = self._key_for(prog)
+        row = self._rows.get(key)
+        if row is None:
+            self._hide_placeholder()
+            display_index = prog.item_index
+            row = DownloadRow(self, prog.title or "Preparing…", display_index, prog.item_count)
+            row.grid(row=len(self._rows), column=0, padx=12, pady=8, sticky="ew")
+            self._rows[key] = row
+        return row
+
+    def _apply_thumbnail(self, row: DownloadRow, url: str):
+        if not url:
+            return
+        if url in self._thumb_cache:
+            cached = self._thumb_cache[url]
+            if isinstance(cached, ctk.CTkImage):
+                row.set_thumbnail(cached)
+            return
+        if url in self._thumb_loading:
+            return
+
+        def finish(image: Optional[ctk.CTkImage]):
+            if image:
+                self._thumb_cache[url] = image
+                if row.winfo_exists():
+                    row.set_thumbnail(image)
+            else:
+                self._thumb_cache[url] = None
+
+        def worker():
+            try:
+                with urllib.request.urlopen(url, timeout=10) as resp:
+                    data = resp.read()
+                image = Image.open(io.BytesIO(data)).convert("RGB")
+                image.thumbnail((200, 200))
+                thumb = ctk.CTkImage(light_image=image, dark_image=image, size=(72, 72))
+            except Exception:
+                thumb = None
+            finally:
+                self.after(0, lambda: finish(thumb))
+                self.after(0, lambda: self._thumb_loading.discard(url))
+
+        self._thumb_loading.add(url)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def update_from_progress(self, prog: DownloadProgress):
+        if prog.message == "all_done":
+            if not self._rows:
+                self._show_placeholder()
+                return
+            for row in self._rows.values():
+                row.mark_complete("Complete")
+            return
+
+        row = self._ensure_row(prog)
+        if prog.thumbnail:
+            self._apply_thumbnail(row, prog.thumbnail)
+        if prog.status == "downloading":
+            for key, other_row in self._rows.items():
+                other_row.set_active(other_row is row)
+            if prog.item_index and prog.item_index > 1:
+                prev_key = f"item-{prog.item_index - 1:04d}"
+                prev_row = self._rows.get(prev_key)
+                if prev_row and prev_row is not row:
+                    prev_row.mark_complete("Complete")
+        row.update_progress(prog)
+        if prog.status in ("error", "stopped"):
+            row.set_active(False)
+
+    def mark_all_inactive(self):
+        for row in self._rows.values():
+            row.set_active(False)
 
 
 
@@ -41,9 +297,11 @@ class App(ctk.CTk):
         self.stop_event = threading.Event()
         self.log_queue = queue.Queue()
         self.progress_queue = queue.Queue()
+        self._current_total_items: Optional[int] = None
 
         # UI build
         self._build_ui()
+        self._clear_activity()
 
         # Poll queues
         self.after(80, self._drain_log_queue)
@@ -138,14 +396,33 @@ class App(ctk.CTk):
         self.eta_label = ctk.CTkLabel(info_frame, text="ETA: —", font=("Segoe UI", 13))
         self.eta_label.pack(side="right", padx=(0, 90))
 
-        # Log box
-        self.log_box = ctk.CTkTextbox(
-            self, width=820, height=300,
-            corner_radius=12, fg_color="#141414",
-            text_color="#e0e0e0", border_width=1, border_color="#333"
+        # Activity + download list
+        downloads_card = ctk.CTkFrame(self, fg_color="#111111", corner_radius=14)
+        downloads_card.pack(pady=(10, 12), padx=30, fill="both", expand=True)
+
+        header_row = ctk.CTkFrame(downloads_card, fg_color="transparent")
+        header_row.pack(fill="x", padx=18, pady=(16, 6))
+
+        self.jobs_title_var = ctk.StringVar(value="Waiting for downloads")
+        jobs_title = ctk.CTkLabel(header_row, textvariable=self.jobs_title_var, font=("Segoe UI", 17, "bold"))
+        jobs_title.pack(side="left")
+
+        self.header_message_var = ctk.StringVar(value="Ready")
+        header_message = ctk.CTkLabel(
+            header_row,
+            textvariable=self.header_message_var,
+            font=("Segoe UI", 12),
+            text_color="#9ba0a5",
+            anchor="e",
         )
-        self.log_box.pack(pady=10)
-        self.log_box.insert("end", "[ready]\n")
+        header_message.pack(side="right")
+
+        header_border = ctk.CTkFrame(downloads_card, fg_color="#1d1d1d", height=1)
+        header_border.pack(fill="x", padx=18, pady=(0, 10))
+        header_border.pack_propagate(False)
+
+        self.download_list = DownloadList(downloads_card, width=780, height=260)
+        self.download_list.pack(fill="both", expand=True, padx=16, pady=(0, 18))
 
         # Status bar
         self.status_var = ctk.StringVar(value="Ready")
@@ -198,11 +475,15 @@ class App(ctk.CTk):
             return
 
         self._set_ui_running(True)
+        self._clear_activity()
         self._log(f"[{human_time()}] 🚀 Starting download…")
         self.stop_event.clear()
         self.progress_bar.set(0)
         self.progress_var.set(0)
         self.percent_label.configure(text="0%")
+        self.download_list.reset()
+        self._current_total_items = None
+        self.jobs_title_var.set("Preparing download…")
 
         if format_choice == "Audio":
             bitrate = AUDIO_QUALITIES.get(quality_choice, DEFAULT_BITRATE)
@@ -271,15 +552,30 @@ class App(ctk.CTk):
         self.log_queue.put(text)
 
     def _log(self, text):
-        self.log_box.insert("end", text + "\n")
-        self.log_box.see("end")
+        self._add_activity_line(text)
+
+    def _format_log_line(self, text: str) -> str:
+        cleaned = text.strip()
+        if "] " in cleaned:
+            cleaned = cleaned.split("] ", 1)[1]
+        if cleaned.lower().startswith("[download] "):
+            cleaned = cleaned.split(" ", 1)[1]
+        return cleaned
+
+    def _clear_activity(self, message: str = "Ready"):
+        self.header_message_var.set(message)
+
+    def _add_activity_line(self, text: str):
+        clean = self._format_log_line(text)
+        if not clean:
+            return
+        self.header_message_var.set(clean)
 
     def _drain_log_queue(self):
         try:
             while True:
                 line = self.log_queue.get_nowait()
-                self.log_box.insert("end", line + "\n")
-                self.log_box.see("end")
+                self._add_activity_line(line)
         except queue.Empty:
             pass
         finally:
@@ -292,16 +588,40 @@ class App(ctk.CTk):
         try:
             while True:
                 prog: DownloadProgress = self.progress_queue.get_nowait()
+                self.download_list.update_from_progress(prog)
+
+                if prog.item_count:
+                    if self._current_total_items != prog.item_count:
+                        self._current_total_items = prog.item_count
+                        if prog.item_count > 1:
+                            self.jobs_title_var.set(f"Playlist • {prog.item_count} tracks")
+                        else:
+                            self.jobs_title_var.set("Single track")
+                elif self._current_total_items is None and prog.title:
+                    self.jobs_title_var.set("Single track")
+
                 if prog.status == "downloading":
                     pct = max(0, min(100, prog.percent or 0))
                     self.progress_var.set(pct / 100)
                     self.percent_label.configure(text=f"{pct:.1f}%")
                     if prog.eta:
                         self.eta_label.configure(text=f"ETA: {int(prog.eta)}s")
-                elif prog.status in ("finished", "stopped", "error"):
-                    if prog.status == "finished":
+                elif prog.status == "finished":
+                    if prog.message == "all_done":
                         self.progress_bar.set(1)
                         self.percent_label.configure(text="100%")
+                        self.eta_label.configure(text="ETA: —")
+                        self.download_list.mark_all_inactive()
+                        self.jobs_title_var.set("Completed")
+                    elif prog.message == "postprocessing":
+                        self.eta_label.configure(text="ETA: —")
+                elif prog.status in ("stopped", "error"):
+                    if prog.status == "stopped":
+                        self.jobs_title_var.set("Stopped")
+                        self.download_list.mark_all_inactive()
+                    if prog.status == "error":
+                        self.jobs_title_var.set("Error during download")
+                    self.eta_label.configure(text="ETA: —")
         except queue.Empty:
             pass
         finally:
