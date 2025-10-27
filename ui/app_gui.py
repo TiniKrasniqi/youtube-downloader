@@ -250,7 +250,9 @@ class App(ctk.CTk):
         self.log_queue = queue.Queue()
         self.progress_queue = queue.Queue()
         self.activity_history = []
-        self.history_window = None
+        self.history_panel = None
+        self.history_images: List[ctk.CTkImage] = []
+        self.history_context_stack: List[Dict[str, object]] = []
         self._current_total_items: Optional[int] = None
 
         # UI build
@@ -451,18 +453,28 @@ class App(ctk.CTk):
             row.grid_columnconfigure(1, weight=1)
             row.pack(fill="x", padx=4, pady=6)
 
-            thumb_padding = (12, 6)
-            if entry.get("thumbnail"):
+            thumb_label = None
+            thumb_container = None
+            thumb_path = entry.get("thumbnail")
+            if thumb_path:
                 try:
-                    with Image.open(entry["thumbnail"]) as img:
-                        pil_img = img.convert("RGBA")
+                    with Image.open(thumb_path) as img:
+                        pil_img = img.convert("RGBA").copy()
                     ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(60, 60))
                     image_store.append(ctk_img)
                     thumb_label = ctk.CTkLabel(row, image=ctk_img, text="")
+                    thumb_label.image = ctk_img
                     thumb_label.grid(row=0, column=0, rowspan=2, padx=(12, 10), pady=10)
-                    thumb_padding = (0, 6)
                 except Exception:
-                    pass
+                    thumb_label = None
+
+            if thumb_label is None:
+                thumb_container = ctk.CTkFrame(row, width=60, height=60, fg_color="#1c1c1c", corner_radius=8)
+                thumb_container.grid(row=0, column=0, rowspan=2, padx=(12, 10), pady=10)
+                thumb_container.grid_propagate(False)
+                icon_text = "📁" if entry.get("type") == "folder" else "🎵"
+                icon_label = ctk.CTkLabel(thumb_container, text=icon_text, font=("Segoe UI Emoji", 28))
+                icon_label.place(relx=0.5, rely=0.5, anchor="center")
 
             title_prefix = "📁 " if entry.get("type") == "folder" else ""
             title_label = ctk.CTkLabel(
@@ -471,7 +483,7 @@ class App(ctk.CTk):
                 font=("Segoe UI", 14, "bold"),
                 anchor="w",
             )
-            title_label.grid(row=0, column=1, sticky="w", padx=(thumb_padding[0], thumb_padding[1]), pady=(10, 0))
+            title_label.grid(row=0, column=1, sticky="w", padx=(0, 6), pady=(10, 0))
 
             meta_parts = []
             timestamp = self._format_timestamp(entry.get("mtime"))
@@ -487,138 +499,182 @@ class App(ctk.CTk):
                 text_color="#8f8f8f",
                 anchor="w",
             )
-            meta_label.grid(row=1, column=1, sticky="w", padx=(thumb_padding[0], thumb_padding[1]), pady=(0, 10))
+            meta_label.grid(row=1, column=1, sticky="w", padx=(0, 6), pady=(0, 10))
 
             if entry.get("type") == "folder" and allow_folders:
-                view_btn = ctk.CTkButton(
-                    row,
-                    text="View",
-                    width=80,
-                    command=lambda p=entry.get("path"), n=entry.get("name"): self._open_history_folder(p, n),
-                )
-                view_btn.grid(row=0, column=2, rowspan=2, padx=(6, 12), pady=12, sticky="e")
+                def open_folder(_event, p=entry.get("path"), n=entry.get("name")):
+                    self._open_history_folder(p, n)
 
-    def _open_history_folder(self, folder_path: str, folder_name: str):
-        entries = self._gather_history(folder_path, include_folders=False)
-        folder_win = ctk.CTkToplevel(self.history_window or self)
-        folder_win.title(f"Playlist: {folder_name}")
-        folder_win.geometry("500x420")
-        folder_win.resizable(False, False)
-        folder_win.transient(self.history_window or self)
+                clickable_widgets = [row, title_label, meta_label]
+                if thumb_label is not None:
+                    clickable_widgets.append(thumb_label)
+                elif thumb_container is not None:
+                    clickable_widgets.extend([thumb_container])
 
-        try:
-            folder_win.grab_set()
-        except Exception:
-            pass
+                for widget in clickable_widgets:
+                    widget.bind("<Button-1>", open_folder)
+                    try:
+                        widget.configure(cursor="hand2")
+                    except Exception:
+                        pass
 
-        header = ctk.CTkLabel(
-            folder_win,
-            text=f"{folder_name}",
-            font=("Segoe UI", 20, "bold"),
+                def on_enter(_event, target=row):
+                    target.configure(fg_color=ROW_ACTIVE_BG)
+
+                def on_leave(_event, target=row):
+                    target.configure(fg_color="#151515")
+
+                row.bind("<Enter>", on_enter)
+                row.bind("<Leave>", on_leave)
+
+    def _ensure_history_panel(self):
+        if self.history_panel is not None:
+            return
+
+        panel = ctk.CTkFrame(self, fg_color="#090909", corner_radius=18)
+        panel.place_forget()
+        panel.grid_columnconfigure(0, weight=1)
+        panel.grid_rowconfigure(2, weight=1)
+
+        header_row = ctk.CTkFrame(panel, fg_color="transparent")
+        header_row.grid(row=0, column=0, sticky="ew", padx=20, pady=(18, 8))
+        header_row.grid_columnconfigure(1, weight=1)
+
+        self.history_back_btn = ctk.CTkButton(
+            header_row,
+            text="← Back",
+            width=90,
+            command=self._on_history_back,
+            state="disabled",
+            fg_color="#2b2b2b",
+            hover_color="#3a3a3a",
         )
-        header.pack(padx=20, pady=(20, 10), anchor="w")
+        self.history_back_btn.grid(row=0, column=0, padx=(0, 12))
 
+        self.history_title_var = ctk.StringVar(value="Download history")
+        title_label = ctk.CTkLabel(header_row, textvariable=self.history_title_var, font=("Segoe UI", 20, "bold"))
+        title_label.grid(row=0, column=1, sticky="w")
+
+        close_btn = ctk.CTkButton(
+            header_row,
+            text="Close",
+            width=80,
+            command=self._hide_history_panel,
+            fg_color="#2b2b2b",
+            hover_color="#3a3a3a",
+        )
+        close_btn.grid(row=0, column=2)
+
+        self.history_dir_var = ctk.StringVar(value="")
         dir_label = ctk.CTkLabel(
-            folder_win,
-            text=f"Folder: {folder_path}",
+            panel,
+            textvariable=self.history_dir_var,
             font=("Segoe UI", 12),
             text_color="#b0b0b0",
             justify="left",
-            wraplength=440,
+            anchor="w",
+            wraplength=480,
         )
-        dir_label.pack(padx=20, pady=(0, 12), fill="x")
+        dir_label.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 8))
 
-        list_frame = ctk.CTkScrollableFrame(folder_win, fg_color="#101010", width=440, height=260)
-        list_frame.pack(padx=20, pady=(0, 20), fill="both", expand=True)
+        self.history_list_frame = ctk.CTkScrollableFrame(panel, fg_color="#101010", width=480)
+        self.history_list_frame.grid(row=2, column=0, sticky="nsew", padx=20, pady=(0, 20))
 
-        folder_win.thumbnail_images = []
+        self.history_panel = panel
+
+    def _populate_history_panel(self, entries: List[Dict], allow_folders: bool):
+        for child in self.history_list_frame.winfo_children():
+            child.destroy()
+        self.history_images.clear()
+
         if not entries:
-            empty_label = ctk.CTkLabel(
-                list_frame,
-                text="No audio files detected in this folder.",
-                text_color="#9e9e9e",
-                font=("Segoe UI", 13),
-                wraplength=400,
-                justify="left",
+            empty_text = (
+                "No saved songs yet. Start a download to build your history."
+                if allow_folders
+                else "No audio files detected in this folder."
             )
-            empty_label.pack(padx=12, pady=12, anchor="w")
-        else:
-            self._render_history_entries(list_frame, entries, allow_folders=False, image_store=folder_win.thumbnail_images)
-
-    def _close_history(self):
-        if self.history_window is None:
-            return
-        try:
-            self.history_window.grab_release()
-        except Exception:
-            pass
-        try:
-            self.history_window.destroy()
-        except Exception:
-            pass
-        finally:
-            self.history_window = None
-
-    def _show_history(self):
-        directory = (self.out_dir_var.get() or "").strip() or default_download_dir()
-
-        if self.history_window is not None and self.history_window.winfo_exists():
-            self.history_window.focus()
-            self.history_window.lift()
-            return
-
-        if not os.path.isdir(directory):
-            messagebox.showinfo("History", "The selected folder does not exist yet.")
-            return
-
-        entries = self._gather_history(directory)
-
-        history_win = ctk.CTkToplevel(self)
-        history_win.title("Download History")
-        history_win.geometry("520x440")
-        history_win.resizable(False, False)
-        history_win.transient(self)
-        try:
-            history_win.grab_set()
-        except Exception:
-            pass
-
-        self.history_window = history_win
-        history_win.protocol("WM_DELETE_WINDOW", self._close_history)
-
-        header = ctk.CTkLabel(
-            history_win,
-            text="Download history",
-            font=("Segoe UI", 20, "bold"),
-        )
-        header.pack(padx=20, pady=(20, 10), anchor="w")
-
-        dir_label = ctk.CTkLabel(
-            history_win,
-            text=f"Folder: {directory}",
-            font=("Segoe UI", 12),
-            text_color="#b0b0b0",
-            justify="left",
-            wraplength=460,
-        )
-        dir_label.pack(padx=20, pady=(0, 10), fill="x")
-
-        list_frame = ctk.CTkScrollableFrame(history_win, fg_color="#101010", width=460, height=280)
-        list_frame.pack(padx=20, pady=(0, 20), fill="both", expand=True)
-
-        history_win.thumbnail_images = []
-        if not entries:
             empty_label = ctk.CTkLabel(
-                list_frame,
-                text="No saved songs yet. Start a download to build your history.",
+                self.history_list_frame,
+                text=empty_text,
                 text_color="#9e9e9e",
                 font=("Segoe UI", 13),
                 wraplength=420,
                 justify="left",
             )
             empty_label.pack(padx=12, pady=12, anchor="w")
+            return
+
+        self._render_history_entries(
+            self.history_list_frame,
+            entries,
+            allow_folders=allow_folders,
+            image_store=self.history_images,
+        )
+
+    def _show_history_panel(self):
+        if not self.history_panel:
+            return
+        self.history_panel.place(relx=0.5, rely=0.5, anchor="center", relwidth=0.78, relheight=0.78)
+
+    def _hide_history_panel(self):
+        if not self.history_panel:
+            return
+        self.history_panel.place_forget()
+        self.history_context_stack = []
+
+    def _load_history_context(self, context: Dict[str, object]):
+        self._ensure_history_panel()
+        directory = (context.get("dir") or "").strip()
+        allow_folders = bool(context.get("allow_folders"))
+        title = context.get("title") or "History"
+
+        self.history_title_var.set(title)
+        if directory:
+            self.history_dir_var.set(f"Folder: {directory}")
         else:
-            self._render_history_entries(list_frame, entries, allow_folders=True, image_store=history_win.thumbnail_images)
+            self.history_dir_var.set("")
+
+        entries = self._gather_history(directory, include_folders=allow_folders)
+        self._populate_history_panel(entries, allow_folders)
+
+        if len(self.history_context_stack) > 1:
+            self.history_back_btn.configure(state="normal", fg_color=ACCENT, hover_color="#00e0a0")
+        else:
+            self.history_back_btn.configure(state="disabled", fg_color="#2b2b2b", hover_color="#3a3a3a")
+
+    def _on_history_back(self):
+        if len(self.history_context_stack) <= 1:
+            return
+        self.history_context_stack.pop()
+        self._load_history_context(self.history_context_stack[-1])
+
+    def _open_history_folder(self, folder_path: str, folder_name: str):
+        self._ensure_history_panel()
+        context = {
+            "title": f"📁 {folder_name}",
+            "dir": folder_path,
+            "allow_folders": False,
+        }
+        self.history_context_stack.append(context)
+        self._load_history_context(context)
+
+    def _show_history(self):
+        directory = (self.out_dir_var.get() or "").strip() or default_download_dir()
+
+        if not os.path.isdir(directory):
+            messagebox.showinfo("History", "The selected folder does not exist yet.")
+            return
+
+        self._ensure_history_panel()
+
+        root_context = {
+            "title": "Download history",
+            "dir": directory,
+            "allow_folders": True,
+        }
+        self.history_context_stack = [root_context]
+        self._load_history_context(root_context)
+        self._show_history_panel()
 
     def _run_download_thread_with_bitrate(self, url, out_dir, bitrate):
         downloader = YTAudioDownloader(self._enqueue_log, self._enqueue_progress, self.stop_event)
