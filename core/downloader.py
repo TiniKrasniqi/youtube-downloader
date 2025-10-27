@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 from dataclasses import dataclass
 from typing import Callable, Optional
+import concurrent.futures
 import os
 import threading
 
@@ -50,6 +51,7 @@ class YTAudioDownloader:
         self._last_title: str = ""
         self._last_item_index: Optional[int] = None
         self._last_item_count: Optional[int] = None
+        self._state_lock = threading.Lock()
 
     def _progress_hook(self, d):
         if self.stop_event.is_set():
@@ -85,9 +87,10 @@ class YTAudioDownloader:
                 item_index=int(playlist_index) if playlist_index is not None else None,
                 item_count=int(playlist_count) if playlist_count else None,
             )
-            self._last_title = progress.title
-            self._last_item_index = progress.item_index
-            self._last_item_count = progress.item_count
+            with self._state_lock:
+                self._last_title = progress.title
+                self._last_item_index = progress.item_index
+                self._last_item_count = progress.item_count
             self.progress(progress)
 
         elif status == "finished":
@@ -100,9 +103,10 @@ class YTAudioDownloader:
                 item_index=int(playlist_index) if playlist_index is not None else None,
                 item_count=int(playlist_count) if playlist_count else None,
             )
-            self._last_title = progress.title
-            self._last_item_index = progress.item_index
-            self._last_item_count = progress.item_count
+            with self._state_lock:
+                self._last_title = progress.title
+                self._last_item_index = progress.item_index
+                self._last_item_count = progress.item_count
             self.progress(progress)
 
     def _build_outtmpl(self, url: str, out_dir: str) -> str:
@@ -138,24 +142,157 @@ class YTAudioDownloader:
             "progress_hooks": [self._progress_hook],
         }
 
-    def download(self, url: str, out_dir: str, bitrate: str = DEFAULT_BITRATE):
+    def _make_progress_hook(self, forced_index: Optional[int], total_items: Optional[int]):
+        def hook(data):
+            info = data.setdefault("info_dict", {})
+            if forced_index is not None and info.get("playlist_index") is None:
+                info["playlist_index"] = forced_index
+            if total_items is not None:
+                if not info.get("playlist_count"):
+                    info["playlist_count"] = total_items
+                if not data.get("playlist_count"):
+                    data["playlist_count"] = total_items
+            self._progress_hook(data)
+
+        return hook
+
+    def _download_sequential(self, url: str, opts: dict) -> bool:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([url])
+        return True
+
+    def _download_playlist_concurrent(self, url: str, opts: dict, concurrency: int) -> bool:
+        extract_opts = dict(opts)
+        extract_opts["skip_download"] = True
+        extract_opts["progress_hooks"] = []
+
+        try:
+            with yt_dlp.YoutubeDL(extract_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except DownloadError as e:
+            self.log(f"[{human_time()}] ❌ Failed to fetch playlist metadata: {e}")
+            return self._download_sequential(url, opts)
+        except Exception as e:
+            self.log(f"[{human_time()}] ❌ Unexpected playlist metadata error: {e}")
+            return self._download_sequential(url, opts)
+
+        entries = info.get("entries") or []
+        entries = [entry for entry in entries if entry]
+        total_items = len(entries)
+
+        if total_items <= 1:
+            return self._download_sequential(url, opts)
+
+        with self._state_lock:
+            self._last_item_count = total_items
+
+        worker_count = max(1, min(concurrency, total_items))
+        self.log(
+            f"[{human_time()}] ⚡ Parallel playlist downloads enabled: {worker_count} at a time (total {total_items})."
+        )
+
+        stop_requested = False
+        had_errors = False
+
+        def worker(entry, index):
+            nonlocal had_errors
+            if self.stop_event.is_set():
+                raise DownloadCancelled("User requested stop.")
+
+            entry_opts = dict(opts)
+            entry_opts["playlist_items"] = str(index)
+            entry_opts["progress_hooks"] = [self._make_progress_hook(index, total_items)]
+
+            try:
+                with yt_dlp.YoutubeDL(entry_opts) as ydl:
+                    ydl.download([url])
+                return True
+            except DownloadCancelled:
+                raise
+            except DownloadError as err:
+                had_errors = True
+                title = entry.get("title") or entry.get("id") or ""
+                self.log(f"[{human_time()}] ❌ Error downloading item {index}: {err}")
+                self.progress(
+                    DownloadProgress(
+                        status="error",
+                        message=str(err),
+                        title=title,
+                        item_index=index,
+                        item_count=total_items,
+                    )
+                )
+                return False
+            except Exception as err:
+                had_errors = True
+                title = entry.get("title") or entry.get("id") or ""
+                self.log(f"[{human_time()}] 💥 Unexpected error for item {index}: {err}")
+                self.progress(
+                    DownloadProgress(
+                        status="error",
+                        message=str(err),
+                        title=title,
+                        item_index=index,
+                        item_count=total_items,
+                    )
+                )
+                return False
+
+        futures = []
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+                for idx, entry in enumerate(entries, start=1):
+                    entry_index = entry.get("playlist_index")
+                    try:
+                        entry_index_int = int(entry_index) if entry_index is not None else idx
+                    except (TypeError, ValueError):
+                        entry_index_int = idx
+                    futures.append(executor.submit(worker, entry, entry_index_int))
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        future.result()
+                    except DownloadCancelled:
+                        stop_requested = True
+                        self.stop_event.set()
+                        break
+        finally:
+            if stop_requested:
+                for future in futures:
+                    future.cancel()
+
+        if stop_requested:
+            raise DownloadCancelled("User requested stop.")
+
+        return not had_errors
+
+    def download(self, url: str, out_dir: str, bitrate: str = DEFAULT_BITRATE, concurrency: int = 1):
         opts = self.build_opts(url, out_dir, bitrate)
         mode = "Auto"
         self.log(f"[{human_time()}] ▶ Starting ({mode}) → MP3 {bitrate} kbps")
         self.log(f"[{human_time()}] 📁 Output: {out_dir}")
 
+        concurrency = max(1, int(concurrency or 1))
+
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([url])
-            if not self.stop_event.is_set():
+            if concurrency > 1:
+                success = self._download_playlist_concurrent(url, opts, concurrency)
+            else:
+                success = self._download_sequential(url, opts)
+
+            if success and not self.stop_event.is_set():
                 self.log(f"[{human_time()}] 🎵 Finished successfully.")
+                with self._state_lock:
+                    title = self._last_title
+                    item_index = self._last_item_index
+                    item_count = self._last_item_count
                 self.progress(DownloadProgress(
                     status="finished",
                     message="all_done",
                     percent=100.0,
-                    title=self._last_title,
-                    item_index=self._last_item_index,
-                    item_count=self._last_item_count,
+                    title=title,
+                    item_index=item_index,
+                    item_count=item_count,
                 ))
 
         except DownloadCancelled as e:
