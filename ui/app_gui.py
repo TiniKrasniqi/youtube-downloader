@@ -34,9 +34,6 @@ AUDIO_QUALITIES = {
 
 VIDEO_QUALITIES = ["480p", "720p", "1080p", "1440p", "2160p (4K)"]
 
-CONCURRENCY_CHOICES = ["1", "2", "3", "4", "5"]
-MAX_PARALLEL_DOWNLOADS = 5
-
 HISTORY_EXTENSIONS = (".mp3", ".m4a", ".wav", ".flac", ".aac", ".ogg", ".mp4", ".webm")
 
 
@@ -222,11 +219,15 @@ class DownloadList(ctk.CTkScrollableFrame):
 
         row = self._ensure_row(prog)
         if prog.status == "downloading":
-            row.set_active(True)
+            for key, other_row in self._rows.items():
+                other_row.set_active(other_row is row)
+            if prog.item_index and prog.item_index > 1:
+                prev_key = f"item-{prog.item_index - 1:04d}"
+                prev_row = self._rows.get(prev_key)
+                if prev_row and prev_row is not row:
+                    prev_row.mark_complete("Complete")
         row.update_progress(prog)
         if prog.status in ("error", "stopped"):
-            row.set_active(False)
-        elif prog.status == "finished" and prog.message != "postprocessing":
             row.set_active(False)
 
     def mark_all_inactive(self):
@@ -255,7 +256,6 @@ class App(ctk.CTk):
         self.history_images: List[ctk.CTkImage] = []
         self.history_context_stack: List[Dict[str, object]] = []
         self._current_total_items: Optional[int] = None
-        self.concurrent_var = ctk.StringVar(value=CONCURRENCY_CHOICES[2])
 
         # UI build
         self._build_ui()
@@ -339,18 +339,6 @@ class App(ctk.CTk):
             width=180,
         )
         self.quality_menu.pack(side="left", padx=(8, 0))
-
-        conc_label = ctk.CTkLabel(selects_row, text="Parallel", font=("Segoe UI", 13))
-        conc_label.pack(side="left", padx=(16, 6))
-
-        self.concurrent_menu = ctk.CTkOptionMenu(
-            selects_row,
-            values=CONCURRENCY_CHOICES,
-            variable=self.concurrent_var,
-            corner_radius=10,
-            width=120,
-        )
-        self.concurrent_menu.pack(side="left")
 
         # Activity + download list
         downloads_card = ctk.CTkFrame(self, fg_color="#111111", corner_radius=14)
@@ -715,10 +703,10 @@ class App(ctk.CTk):
         self._load_history_context(root_context)
         self._show_history_panel()
 
-    def _run_download_thread_with_bitrate(self, url, out_dir, bitrate, concurrency):
+    def _run_download_thread_with_bitrate(self, url, out_dir, bitrate):
         downloader = YTAudioDownloader(self._enqueue_log, self._enqueue_progress, self.stop_event)
         try:
-            downloader.download(url, out_dir, bitrate=bitrate, concurrency=concurrency)
+            downloader.download(url, out_dir, bitrate=bitrate)
         finally:
             self.after(0, lambda: self._set_ui_running(False))
             self.after(0, self._update_status_finished)
@@ -757,19 +745,10 @@ class App(ctk.CTk):
 
         if format_choice == "Audio":
             bitrate = AUDIO_QUALITIES.get(quality_choice, DEFAULT_BITRATE)
-            try:
-                concurrency_value = int(self.concurrent_var.get())
-            except (TypeError, ValueError):
-                concurrency_value = 1
-            concurrency_value = max(1, min(MAX_PARALLEL_DOWNLOADS, concurrency_value))
-
-            if concurrency_value > 1:
-                self.status_var.set(f"Audio: {quality_choice} • {concurrency_value} parallel")
-            else:
-                self.status_var.set(f"Audio: {quality_choice}")
+            self.status_var.set(f"Audio: {quality_choice}")
             self.worker = threading.Thread(
                 target=self._run_download_thread_with_bitrate,
-                args=(url, out_dir, bitrate, concurrency_value),
+                args=(url, out_dir, bitrate),
                 daemon=True,
             )
         else:
@@ -790,14 +769,10 @@ class App(ctk.CTk):
             self.quality_menu.configure(values=list(AUDIO_QUALITIES.keys()))
             if self.quality_var.get() not in AUDIO_QUALITIES:
                 self.quality_var.set("192 kbps")
-            if self.start_btn.cget("text") == "Start":
-                self.concurrent_menu.configure(state="normal")
         else:
             self.quality_menu.configure(values=VIDEO_QUALITIES)
             if self.quality_var.get() not in VIDEO_QUALITIES:
                 self.quality_var.set("720p")
-            self.concurrent_var.set("1")
-            self.concurrent_menu.configure(state="disabled")
 
 
 
@@ -910,12 +885,9 @@ class App(ctk.CTk):
         if running:
             self.url_entry.configure(state="disabled")
             self.folder_entry.configure(state="disabled")
-            self.concurrent_menu.configure(state="disabled")
         else:
             self.url_entry.configure(state="normal")
             self.folder_entry.configure(state="normal")
-            conc_state = "normal" if self.format_var.get() == "Audio" else "disabled"
-            self.concurrent_menu.configure(state=conc_state)
             # Reset Start button appearance if the job finished naturally
             if self.start_btn.cget("text") == "Stop":
                 self.start_btn.configure(text="Start", fg_color=ACCENT, hover_color="#00e0a0")
