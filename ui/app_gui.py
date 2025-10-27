@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 import os
+import sys
 import threading
 import queue
+import subprocess
 from datetime import datetime
 from typing import Dict, Optional, List
 
@@ -501,6 +503,17 @@ class App(ctk.CTk):
             )
             meta_label.grid(row=1, column=1, sticky="w", padx=(0, 6), pady=(0, 10))
 
+            if entry.get("type") == "file":
+                play_btn = ctk.CTkButton(
+                    row,
+                    text="Play",
+                    width=70,
+                    command=lambda p=entry.get("path"): self._play_history_entry(p),
+                    fg_color=ACCENT,
+                    hover_color="#00e0a0",
+                )
+                play_btn.grid(row=0, column=2, rowspan=2, padx=(6, 12), pady=12)
+
             if entry.get("type") == "folder" and allow_folders:
                 def open_folder(_event, p=entry.get("path"), n=entry.get("name")):
                     self._open_history_folder(p, n)
@@ -526,6 +539,19 @@ class App(ctk.CTk):
 
                 row.bind("<Enter>", on_enter)
                 row.bind("<Leave>", on_leave)
+
+    def _play_history_entry(self, file_path: str):
+        if not file_path:
+            return
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(file_path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", file_path])
+            else:
+                subprocess.Popen(["xdg-open", file_path])
+        except Exception as exc:
+            messagebox.showerror("Play file", f"Could not open this file.\n\n{exc}")
 
     def _ensure_history_panel(self):
         if self.history_panel is not None:
@@ -573,11 +599,11 @@ class App(ctk.CTk):
             text_color="#b0b0b0",
             justify="left",
             anchor="w",
-            wraplength=480,
+            wraplength=760,
         )
         dir_label.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 8))
 
-        self.history_list_frame = ctk.CTkScrollableFrame(panel, fg_color="#101010", width=480)
+        self.history_list_frame = ctk.CTkScrollableFrame(panel, fg_color="#101010")
         self.history_list_frame.grid(row=2, column=0, sticky="nsew", padx=20, pady=(0, 20))
 
         self.history_panel = panel
@@ -614,7 +640,8 @@ class App(ctk.CTk):
     def _show_history_panel(self):
         if not self.history_panel:
             return
-        self.history_panel.place(relx=0.5, rely=0.5, anchor="center", relwidth=0.78, relheight=0.78)
+        self.history_panel.place(x=0, y=0, relwidth=1.0, relheight=1.0)
+        self.history_panel.lift()
 
     def _hide_history_panel(self):
         if not self.history_panel:
