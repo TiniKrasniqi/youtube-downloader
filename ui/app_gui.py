@@ -3,10 +3,12 @@ import os
 import threading
 import queue
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
+
+from PIL import Image
 
 from core.utils import ensure_ffmpeg_or_die, default_download_dir, human_time, DEFAULT_BITRATE
 from core.downloader import YTAudioDownloader, DownloadProgress
@@ -382,20 +384,166 @@ class App(ctk.CTk):
         if chosen:
             self.out_dir_var.set(chosen)
 
-    def _gather_history(self, directory: str):
+    def _find_thumbnail(self, file_path: str) -> Optional[str]:
+        base, _ = os.path.splitext(file_path)
+        for ext in (".jpg", ".jpeg", ".png", ".webp"):
+            candidate = base + ext
+            if os.path.exists(candidate):
+                return candidate
+        return None
+
+    def _gather_history(self, directory: str, include_folders: bool = True):
         entries = []
         try:
             for entry in os.scandir(directory):
-                if entry.is_file() and entry.name.lower().endswith(HISTORY_EXTENSIONS):
-                    try:
-                        mtime = entry.stat().st_mtime
-                    except OSError:
-                        mtime = 0
-                    entries.append((entry.name, mtime))
+                path = entry.path
+                try:
+                    if entry.is_file() and entry.name.lower().endswith(HISTORY_EXTENSIONS):
+                        try:
+                            mtime = entry.stat().st_mtime
+                        except OSError:
+                            mtime = 0
+                        entries.append(
+                            {
+                                "type": "file",
+                                "name": entry.name,
+                                "path": path,
+                                "mtime": mtime,
+                                "thumbnail": self._find_thumbnail(path),
+                            }
+                        )
+                    elif include_folders and entry.is_dir():
+                        children = self._gather_history(path, include_folders=False)
+                        if not children:
+                            continue
+                        try:
+                            folder_mtime = entry.stat().st_mtime
+                        except OSError:
+                            folder_mtime = 0
+                        latest_child_mtime = max((child.get("mtime") or 0) for child in children) if children else 0
+                        entries.append(
+                            {
+                                "type": "folder",
+                                "name": entry.name,
+                                "path": path,
+                                "mtime": max(folder_mtime, latest_child_mtime),
+                                "count": len(children),
+                            }
+                        )
+                except OSError:
+                    continue
         except OSError:
             return []
-        entries.sort(key=lambda item: item[1], reverse=True)
+        entries.sort(key=lambda item: item.get("mtime") or 0, reverse=True)
         return entries
+
+    def _format_timestamp(self, mtime: Optional[float]) -> str:
+        if not mtime:
+            return ""
+        try:
+            return datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        except (ValueError, OSError):
+            return ""
+
+    def _render_history_entries(self, parent: ctk.CTkScrollableFrame, entries: List[Dict], allow_folders: bool, image_store: List[ctk.CTkImage]):
+        for entry in entries:
+            row = ctk.CTkFrame(parent, fg_color="#151515", corner_radius=10)
+            row.grid_columnconfigure(1, weight=1)
+            row.pack(fill="x", padx=4, pady=6)
+
+            thumb_padding = (12, 6)
+            if entry.get("thumbnail"):
+                try:
+                    with Image.open(entry["thumbnail"]) as img:
+                        pil_img = img.convert("RGBA")
+                    ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(60, 60))
+                    image_store.append(ctk_img)
+                    thumb_label = ctk.CTkLabel(row, image=ctk_img, text="")
+                    thumb_label.grid(row=0, column=0, rowspan=2, padx=(12, 10), pady=10)
+                    thumb_padding = (0, 6)
+                except Exception:
+                    pass
+
+            title_prefix = "📁 " if entry.get("type") == "folder" else ""
+            title_label = ctk.CTkLabel(
+                row,
+                text=f"{title_prefix}{entry.get('name', '')}",
+                font=("Segoe UI", 14, "bold"),
+                anchor="w",
+            )
+            title_label.grid(row=0, column=1, sticky="w", padx=(thumb_padding[0], thumb_padding[1]), pady=(10, 0))
+
+            meta_parts = []
+            timestamp = self._format_timestamp(entry.get("mtime"))
+            if timestamp:
+                meta_parts.append(timestamp)
+            if entry.get("type") == "folder" and entry.get("count"):
+                meta_parts.append(f"{entry['count']} tracks")
+            meta_text = " • ".join(meta_parts) if meta_parts else ""
+            meta_label = ctk.CTkLabel(
+                row,
+                text=meta_text,
+                font=("Segoe UI", 12),
+                text_color="#8f8f8f",
+                anchor="w",
+            )
+            meta_label.grid(row=1, column=1, sticky="w", padx=(thumb_padding[0], thumb_padding[1]), pady=(0, 10))
+
+            if entry.get("type") == "folder" and allow_folders:
+                view_btn = ctk.CTkButton(
+                    row,
+                    text="View",
+                    width=80,
+                    command=lambda p=entry.get("path"), n=entry.get("name"): self._open_history_folder(p, n),
+                )
+                view_btn.grid(row=0, column=2, rowspan=2, padx=(6, 12), pady=12, sticky="e")
+
+    def _open_history_folder(self, folder_path: str, folder_name: str):
+        entries = self._gather_history(folder_path, include_folders=False)
+        folder_win = ctk.CTkToplevel(self.history_window or self)
+        folder_win.title(f"Playlist: {folder_name}")
+        folder_win.geometry("500x420")
+        folder_win.resizable(False, False)
+        folder_win.transient(self.history_window or self)
+
+        try:
+            folder_win.grab_set()
+        except Exception:
+            pass
+
+        header = ctk.CTkLabel(
+            folder_win,
+            text=f"{folder_name}",
+            font=("Segoe UI", 20, "bold"),
+        )
+        header.pack(padx=20, pady=(20, 10), anchor="w")
+
+        dir_label = ctk.CTkLabel(
+            folder_win,
+            text=f"Folder: {folder_path}",
+            font=("Segoe UI", 12),
+            text_color="#b0b0b0",
+            justify="left",
+            wraplength=440,
+        )
+        dir_label.pack(padx=20, pady=(0, 12), fill="x")
+
+        list_frame = ctk.CTkScrollableFrame(folder_win, fg_color="#101010", width=440, height=260)
+        list_frame.pack(padx=20, pady=(0, 20), fill="both", expand=True)
+
+        folder_win.thumbnail_images = []
+        if not entries:
+            empty_label = ctk.CTkLabel(
+                list_frame,
+                text="No audio files detected in this folder.",
+                text_color="#9e9e9e",
+                font=("Segoe UI", 13),
+                wraplength=400,
+                justify="left",
+            )
+            empty_label.pack(padx=12, pady=12, anchor="w")
+        else:
+            self._render_history_entries(list_frame, entries, allow_folders=False, image_store=folder_win.thumbnail_images)
 
     def _close_history(self):
         if self.history_window is None:
@@ -458,6 +606,7 @@ class App(ctk.CTk):
         list_frame = ctk.CTkScrollableFrame(history_win, fg_color="#101010", width=460, height=280)
         list_frame.pack(padx=20, pady=(0, 20), fill="both", expand=True)
 
+        history_win.thumbnail_images = []
         if not entries:
             empty_label = ctk.CTkLabel(
                 list_frame,
@@ -469,28 +618,7 @@ class App(ctk.CTk):
             )
             empty_label.pack(padx=12, pady=12, anchor="w")
         else:
-            for name, mtime in entries:
-                row = ctk.CTkFrame(list_frame, fg_color="#151515", corner_radius=10)
-                row.pack(fill="x", padx=4, pady=6)
-
-                title_label = ctk.CTkLabel(
-                    row,
-                    text=name,
-                    font=("Segoe UI", 14, "bold"),
-                    anchor="w",
-                )
-                title_label.pack(side="left", padx=(12, 6), pady=10)
-
-                if mtime:
-                    timestamp = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
-                    meta_label = ctk.CTkLabel(
-                        row,
-                        text=timestamp,
-                        font=("Segoe UI", 12),
-                        text_color="#8f8f8f",
-                        anchor="e",
-                    )
-                    meta_label.pack(side="right", padx=(6, 12), pady=10)
+            self._render_history_entries(list_frame, entries, allow_folders=True, image_store=history_win.thumbnail_images)
 
     def _run_download_thread_with_bitrate(self, url, out_dir, bitrate):
         downloader = YTAudioDownloader(self._enqueue_log, self._enqueue_progress, self.stop_event)
