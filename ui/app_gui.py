@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
+import os
 import threading
 import queue
+from datetime import datetime
 from typing import Dict, Optional
 
 import customtkinter as ctk
@@ -27,6 +29,8 @@ AUDIO_QUALITIES = {
 }
 
 VIDEO_QUALITIES = ["480p", "720p", "1080p", "1440p", "2160p (4K)"]
+
+HISTORY_EXTENSIONS = (".mp3", ".m4a", ".wav", ".flac", ".aac", ".ogg", ".mp4", ".webm")
 
 
 class DownloadRow(ctk.CTkFrame):
@@ -244,6 +248,7 @@ class App(ctk.CTk):
         self.log_queue = queue.Queue()
         self.progress_queue = queue.Queue()
         self.activity_history = []
+        self.history_window = None
         self._current_total_items: Optional[int] = None
 
         # UI build
@@ -340,6 +345,18 @@ class App(ctk.CTk):
         jobs_title = ctk.CTkLabel(header_row, textvariable=self.jobs_title_var, font=("Segoe UI", 17, "bold"))
         jobs_title.pack(side="left")
 
+        self.history_btn = ctk.CTkButton(
+            header_row,
+            text="History",
+            width=110,
+            height=34,
+            corner_radius=8,
+            fg_color=ACCENT,
+            hover_color="#00e0a0",
+            command=self._show_history,
+        )
+        self.history_btn.pack(side="right")
+
         header_divider = ctk.CTkFrame(downloads_card, height=2, fg_color="#1f1f1f")
         header_divider.pack(fill="x", padx=16, pady=(0, 12))
 
@@ -364,6 +381,116 @@ class App(ctk.CTk):
         chosen = filedialog.askdirectory(initialdir=self.out_dir_var.get() or default_download_dir())
         if chosen:
             self.out_dir_var.set(chosen)
+
+    def _gather_history(self, directory: str):
+        entries = []
+        try:
+            for entry in os.scandir(directory):
+                if entry.is_file() and entry.name.lower().endswith(HISTORY_EXTENSIONS):
+                    try:
+                        mtime = entry.stat().st_mtime
+                    except OSError:
+                        mtime = 0
+                    entries.append((entry.name, mtime))
+        except OSError:
+            return []
+        entries.sort(key=lambda item: item[1], reverse=True)
+        return entries
+
+    def _close_history(self):
+        if self.history_window is None:
+            return
+        try:
+            self.history_window.grab_release()
+        except Exception:
+            pass
+        try:
+            self.history_window.destroy()
+        except Exception:
+            pass
+        finally:
+            self.history_window = None
+
+    def _show_history(self):
+        directory = (self.out_dir_var.get() or "").strip() or default_download_dir()
+
+        if self.history_window is not None and self.history_window.winfo_exists():
+            self.history_window.focus()
+            self.history_window.lift()
+            return
+
+        if not os.path.isdir(directory):
+            messagebox.showinfo("History", "The selected folder does not exist yet.")
+            return
+
+        entries = self._gather_history(directory)
+
+        history_win = ctk.CTkToplevel(self)
+        history_win.title("Download History")
+        history_win.geometry("520x440")
+        history_win.resizable(False, False)
+        history_win.transient(self)
+        try:
+            history_win.grab_set()
+        except Exception:
+            pass
+
+        self.history_window = history_win
+        history_win.protocol("WM_DELETE_WINDOW", self._close_history)
+
+        header = ctk.CTkLabel(
+            history_win,
+            text="Download history",
+            font=("Segoe UI", 20, "bold"),
+        )
+        header.pack(padx=20, pady=(20, 10), anchor="w")
+
+        dir_label = ctk.CTkLabel(
+            history_win,
+            text=f"Folder: {directory}",
+            font=("Segoe UI", 12),
+            text_color="#b0b0b0",
+            justify="left",
+            wraplength=460,
+        )
+        dir_label.pack(padx=20, pady=(0, 10), fill="x")
+
+        list_frame = ctk.CTkScrollableFrame(history_win, fg_color="#101010", width=460, height=280)
+        list_frame.pack(padx=20, pady=(0, 20), fill="both", expand=True)
+
+        if not entries:
+            empty_label = ctk.CTkLabel(
+                list_frame,
+                text="No saved songs yet. Start a download to build your history.",
+                text_color="#9e9e9e",
+                font=("Segoe UI", 13),
+                wraplength=420,
+                justify="left",
+            )
+            empty_label.pack(padx=12, pady=12, anchor="w")
+        else:
+            for name, mtime in entries:
+                row = ctk.CTkFrame(list_frame, fg_color="#151515", corner_radius=10)
+                row.pack(fill="x", padx=4, pady=6)
+
+                title_label = ctk.CTkLabel(
+                    row,
+                    text=name,
+                    font=("Segoe UI", 14, "bold"),
+                    anchor="w",
+                )
+                title_label.pack(side="left", padx=(12, 6), pady=10)
+
+                if mtime:
+                    timestamp = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+                    meta_label = ctk.CTkLabel(
+                        row,
+                        text=timestamp,
+                        font=("Segoe UI", 12),
+                        text_color="#8f8f8f",
+                        anchor="e",
+                    )
+                    meta_label.pack(side="right", padx=(6, 12), pady=10)
 
     def _run_download_thread_with_bitrate(self, url, out_dir, bitrate):
         downloader = YTAudioDownloader(self._enqueue_log, self._enqueue_progress, self.stop_event)
