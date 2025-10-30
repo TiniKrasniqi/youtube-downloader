@@ -41,4 +41,27 @@ A polished desktop app for turning YouTube links into high-quality audio or vide
    python main.py
    ```
 
+## 📦 Building a distributable installer
+
+You can bundle the application with platform-specific installation helpers by
+running the build script:
+
+```bash
+python installer/build.py
+```
+
+The script produces `dist/youtube_downloader_installer.zip`, which contains the
+application source alongside two installer entry points:
+
+- **Windows:** Run `install.ps1`. The script downloads Python if it is missing,
+  creates an isolated virtual environment, and installs all Python
+  dependencies automatically.
+- **Linux/macOS:** Run `install.sh`. The script ensures Python 3 is installed
+  (using `apt` or Homebrew when available), provisions a virtual environment,
+  and installs the required packages.
+
+After either installer completes, launch the application with the generated
+`run_app` helper script (`run_app.ps1` on Windows or `run_app.sh` on
+Linux/macOS).
+
 Happy downloading! 🎵
