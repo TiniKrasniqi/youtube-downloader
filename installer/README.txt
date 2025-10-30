@@ -7,18 +7,9 @@ that automate the installation process on both Windows and Unix-like systems.
 Building the installer
 ----------------------
 1. Ensure you have Python 3.8 or newer available.
-2. (Windows only) Install PyInstaller so the standalone executable can be
-   produced:
-       pip install pyinstaller
-3. From the project root, run:
+2. From the project root, run:
        python installer/build.py
-4. The archive "dist/youtube_downloader_installer.zip" will be created. On
-   Windows this build step also bundles a `youtube-downloader.exe` inside the
-   `app/` directory of the archive.
-
-Note: the build script must be executed on Windows to produce the standalone
-executable. Running it on other operating systems will stop with an error that
-explains the requirement.
+3. The archive "dist/youtube_downloader_installer.zip" will be created.
 
 Using the installer
 -------------------
