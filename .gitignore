@@ -17,3 +17,8 @@ dist/
 Thumbs.db
 .idea/
 .vscode/
+# Distribution artifacts
+/dist/
+
+# Python virtual environments created by installers
+/venv/
