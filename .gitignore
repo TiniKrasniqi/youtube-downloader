@@ -1,0 +1,5 @@
+# Distribution artifacts
+/dist/
+
+# Python virtual environments created by installers
+/venv/
