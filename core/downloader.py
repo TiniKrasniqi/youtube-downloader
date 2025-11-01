@@ -121,20 +121,16 @@ class YTAudioDownloader:
             "format": "bestaudio/best",
             "postprocessors": [
                 {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": bitrate},
-                {"key": "FFmpegMetadata"},
-                {"key": "EmbedThumbnail"},
             ],
-            "writethumbnail": True,
-            "embedthumbnail": True,
-            "addmetadata": True,
             # Do not ignore errors so they surface in the UI instead of reporting
             # a successful download despite failures.
-            "retries": 10,
+            "retries": 3,
             "continuedl": True,
             "noprogress": True,
             "concurrent_fragment_downloads": 4,
             "windowsfilenames": True,
             "restrictfilenames": False,
+            "lazy_playlist": True,
             "logger": YTDLogger(self.log),
             "progress_hooks": [self._progress_hook],
         }
@@ -146,6 +142,7 @@ class YTAudioDownloader:
         self.log(f"[{human_time()}] 📁 Output: {out_dir}")
 
         try:
+            self.progress(DownloadProgress(status="downloading", message="preparing"))
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
             if not self.stop_event.is_set():
