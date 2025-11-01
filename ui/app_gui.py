@@ -240,7 +240,7 @@ class DownloadList(ctk.CTkScrollableFrame):
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("YouTube → MP3 (192 kbps)")
+        self.title("YouTube Donwloader")
         self.geometry("880x620")
         self.minsize(780, 540)
 
@@ -313,7 +313,7 @@ class App(ctk.CTk):
         selects_row.pack(pady=(2, 6), padx=30, fill="x")
 
         self.format_var = ctk.StringVar(value="Audio")
-        self.quality_var = ctk.StringVar(value="MP3 192 kbps")  # default
+        self.quality_var = ctk.StringVar(value="192 kbps")  # default
 
         # format_label = ctk.CTkLabel(selects_row, text="Format", font=("Segoe UI", 13))
         # format_label.pack(side="left")
@@ -337,6 +337,7 @@ class App(ctk.CTk):
             variable=self.quality_var,
             corner_radius=10,
             width=180,
+            command=self._on_quality_change,
         )
         self.quality_menu.pack(side="left", padx=(8, 0))
 
@@ -377,12 +378,33 @@ class App(ctk.CTk):
         )
         self.status_label.pack(pady=(5, 10))
 
+        self._update_window_title()
+
 
 
 
     # ------------------------------------------------------------
     # UI events
     # ------------------------------------------------------------
+
+
+    def _update_window_title(self):
+        """Reflect the current format/quality in the window title."""
+        format_choice = self.format_var.get()
+        if format_choice == "Audio":
+            quality_label = self.quality_var.get()
+            if quality_label.startswith("MP3 "):
+                quality_label = quality_label[4:]
+            if quality_label not in AUDIO_QUALITIES:
+                quality_label = f"{DEFAULT_BITRATE} kbps"
+            self.title(f"YouTube → MP3 ({quality_label})")
+        else:
+            quality_label = self.quality_var.get()
+            if quality_label not in VIDEO_QUALITIES:
+                quality_label = "720p"
+            self.title(f"YouTube → MP4 ({quality_label})")
+
+
     def _choose_dir(self):
         chosen = filedialog.askdirectory(initialdir=self.out_dir_var.get() or default_download_dir())
         if chosen:
@@ -724,6 +746,7 @@ class App(ctk.CTk):
     def _on_start(self):
         format_choice = self.format_var.get()
         quality_choice = self.quality_var.get()
+        self._update_window_title()
 
         url = (self.url_entry.get() or "").strip()
         out_dir = (self.out_dir_var.get() or "").strip()
@@ -773,6 +796,11 @@ class App(ctk.CTk):
             self.quality_menu.configure(values=VIDEO_QUALITIES)
             if self.quality_var.get() not in VIDEO_QUALITIES:
                 self.quality_var.set("720p")
+
+        self._update_window_title()
+
+    def _on_quality_change(self, choice: str):
+        self._update_window_title()
 
 
 
