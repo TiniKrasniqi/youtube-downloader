@@ -24,6 +24,7 @@ class DownloadProgress:
     item_index: Optional[int] = None
     item_count: Optional[int] = None
     job_id: Optional[str] = None
+    thumbnail_url: Optional[str] = None
 
 
 class YTDLogger:
