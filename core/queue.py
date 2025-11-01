@@ -27,6 +27,21 @@ class QueueEntry:
     title: str = ""
     index: Optional[int] = None
     total: Optional[int] = None
+    thumbnail_url: Optional[str] = None
+
+
+def _extract_thumbnail(entry: Dict[str, Any]) -> Optional[str]:
+    thumb = entry.get("thumbnail")
+    if isinstance(thumb, str) and thumb.startswith("http"):
+        return thumb
+
+    thumbs = entry.get("thumbnails")
+    if isinstance(thumbs, list):
+        for thumb_entry in thumbs:
+            url = thumb_entry.get("url") if isinstance(thumb_entry, dict) else None
+            if isinstance(url, str) and url.startswith("http"):
+                return url
+    return None
 
 
 def _normalise_entry_url(entry: Dict[str, Any]) -> Optional[str]:
@@ -74,11 +89,13 @@ def resolve_entries(url: str, log: Optional[LogCallback] = None) -> List[QueueEn
             if not resolved_url:
                 continue
             title = entry.get("title") or ""
-            entries.append(QueueEntry(url=resolved_url, title=title, index=idx, total=total))
+            thumb = _extract_thumbnail(entry)
+            entries.append(QueueEntry(url=resolved_url, title=title, index=idx, total=total, thumbnail_url=thumb))
     else:
         resolved_url = info.get("webpage_url") or info.get("original_url") or url
         title = info.get("title") or ""
-        entries.append(QueueEntry(url=resolved_url, title=title, index=1, total=1))
+        thumb = _extract_thumbnail(info)
+        entries.append(QueueEntry(url=resolved_url, title=title, index=1, total=1, thumbnail_url=thumb))
 
     if log:
         if entries and (entries[0].total or len(entries) > 1):
@@ -99,7 +116,12 @@ class DownloadManager:
     def __init__(self, log_cb: LogCallback, progress_cb: ProgressCallback, max_workers: int = 3):
         self._log = log_cb
         self._progress = progress_cb
-        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="yt-dl")
+        try:
+            initial_workers = int(max_workers)
+        except (TypeError, ValueError):
+            initial_workers = 1
+        self._max_workers = max(1, initial_workers)
+        self._executor = ThreadPoolExecutor(max_workers=self._max_workers, thread_name_prefix="yt-dl")
         self._lock = threading.Lock()
         self._stop_events: Dict[str, threading.Event] = {}
         self._futures: Dict[str, Future] = {}
@@ -107,10 +129,35 @@ class DownloadManager:
         self._cancel_requested = False
         self._had_errors = False
 
+    @property
+    def max_workers(self) -> int:
+        return self._max_workers
+
     # ------------------------------------------------------------------
     def has_active_jobs(self) -> bool:
         with self._lock:
             return bool(self._futures)
+
+    # ------------------------------------------------------------------
+    def set_max_workers(self, max_workers: int) -> bool:
+        try:
+            desired = int(max_workers)
+        except (TypeError, ValueError):
+            return False
+
+        desired = max(1, min(desired, 8))
+        if desired == self._max_workers:
+            return True
+
+        with self._lock:
+            if self._futures:
+                return False
+
+        old_executor = self._executor
+        self._executor = ThreadPoolExecutor(max_workers=desired, thread_name_prefix="yt-dl")
+        self._max_workers = desired
+        old_executor.shutdown(wait=False, cancel_futures=False)
+        return True
 
     # ------------------------------------------------------------------
     def start_audio(self, url: str, out_dir: str, bitrate: str) -> None:
@@ -162,6 +209,7 @@ class DownloadManager:
             item_index=entry.index,
             item_count=entry.total,
             job_id=job_id,
+            thumbnail_url=entry.thumbnail_url,
         )
         self._progress(placeholder)
 
@@ -184,6 +232,8 @@ class DownloadManager:
                 progress.item_index = entry.index
             if progress.item_count is None:
                 progress.item_count = entry.total
+            if progress.thumbnail_url is None:
+                progress.thumbnail_url = entry.thumbnail_url
             if progress.status == "error":
                 self._had_errors = True
             self._progress(progress)
