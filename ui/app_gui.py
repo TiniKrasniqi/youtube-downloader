@@ -74,7 +74,8 @@ def _fetch_thumbnail_bytes(url: str) -> Optional[bytes]:
 class DownloadRow(ctk.CTkFrame):
     def __init__(self, master, title: str, item_index: Optional[int] = None, item_count: Optional[int] = None):
         super().__init__(master, corner_radius=10, fg_color=ROW_BG)
-        self.columnconfigure(2, weight=1)
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(0, weight=1)
 
         self._item_index = item_index
         self._item_count = item_count
@@ -82,36 +83,53 @@ class DownloadRow(ctk.CTkFrame):
         self._active = False
         self._thumbnail_url: Optional[str] = None
 
-        index_text = self._format_index()
-        self.index_label = ctk.CTkLabel(self, text=index_text, width=60, anchor="w", font=("Segoe UI", 13, "bold"))
-        self.index_label.grid(row=0, column=0, padx=(14, 8), pady=(12, 0), sticky="w")
-
-        self.thumb_container = ctk.CTkFrame(self, width=68, height=68, fg_color="#1f1f1f", corner_radius=8)
-        self.thumb_container.grid(row=0, column=1, rowspan=3, padx=(0, 12), pady=8)
+        self.thumb_container = ctk.CTkFrame(self, width=72, height=72, fg_color="#1f1f1f", corner_radius=8)
+        self.thumb_container.grid(row=0, column=0, rowspan=2, padx=(14, 12), pady=8)
         self.thumb_container.grid_propagate(False)
 
         self.thumbnail_label = ctk.CTkLabel(self.thumb_container, text="🎬", font=("Segoe UI Emoji", 26))
         self.thumbnail_label.place(relx=0.5, rely=0.5, anchor="center")
         self.thumbnail_label.image = None
 
-        self.title_label = ctk.CTkLabel(self, text=self._title, anchor="w", font=("Segoe UI", 15, "bold"))
-        self.title_label.grid(row=0, column=2, pady=(12, 0), sticky="w")
-
-        self.percent_label = ctk.CTkLabel(self, text="0%", anchor="e", font=("Segoe UI", 13))
-        self.percent_label.grid(row=0, column=3, padx=(8, 16), pady=(12, 0), sticky="e")
-
         self.progress_var = ctk.DoubleVar(value=0)
-        self.progress_bar = ctk.CTkProgressBar(self, variable=self.progress_var, height=10)
-        self.progress_bar.grid(row=1, column=0, columnspan=4, padx=16, pady=(6, 4), sticky="ew")
+        self.progress_bar = ctk.CTkProgressBar(self.thumb_container, variable=self.progress_var, height=10)
+        self.progress_bar.place(relx=0.5, rely=0.97, anchor="s", relwidth=0.88)
+
+        self.percent_label = ctk.CTkLabel(
+            self.thumb_container,
+            text="0%",
+            anchor="e",
+            font=("Segoe UI", 13, "bold"),
+            text_color="#f5f5f5",
+        )
+        self.percent_label.place(relx=0.92, rely=0.08, anchor="ne")
+
+        self.meta_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.meta_frame.grid(row=0, column=1, rowspan=2, padx=(0, 16), pady=(16, 12), sticky="nsew")
+        self.meta_frame.columnconfigure(1, weight=1)
+
+        index_text = self._format_index()
+        self.index_label = ctk.CTkLabel(
+            self.meta_frame,
+            text=index_text,
+            width=60,
+            anchor="w",
+            font=("Segoe UI", 13, "bold"),
+        )
+        self.index_label.grid(row=0, column=0, padx=(0, 8), sticky="w")
+
+        self.title_label = ctk.CTkLabel(self.meta_frame, text=self._title, anchor="w", font=("Segoe UI", 15, "bold"))
+        self.title_label.grid(row=0, column=1, sticky="w")
 
         self.status_label = ctk.CTkLabel(
-            self,
+            self.meta_frame,
             text="Waiting…",
             anchor="w",
             font=("Segoe UI", 12),
             text_color="#b0b0b0",
+            wraplength=520,
         )
-        self.status_label.grid(row=2, column=0, columnspan=4, padx=16, pady=(0, 12), sticky="w")
+        self.status_label.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
     def _set_thumbnail_placeholder(self):
         self.thumbnail_label.configure(text="🎬", image=None)
