@@ -13,7 +13,8 @@ from tkinter import filedialog, messagebox
 from PIL import Image
 
 from core.utils import ensure_ffmpeg_or_die, default_download_dir, human_time, DEFAULT_BITRATE
-from core.downloader import YTAudioDownloader, DownloadProgress
+from core.downloader import DownloadProgress
+from core.queue import DownloadManager
 
 
 # Color theme
@@ -120,7 +121,10 @@ class DownloadRow(ctk.CTkFrame):
         status_text = ""
         text_color = "#b0b0b0"
 
-        if prog.status == "downloading":
+        if prog.status == "queued":
+            status_text = "Queued"
+            text_color = "#9e9e9e"
+        elif prog.status == "downloading":
             status_parts = []
             if prog.percent:
                 status_parts.append(f"{prog.percent:.1f}%")
@@ -190,6 +194,8 @@ class DownloadList(ctk.CTkScrollableFrame):
         self._empty_label.grid_forget()
 
     def _key_for(self, prog: DownloadProgress) -> str:
+        if prog.job_id:
+            return prog.job_id
         if prog.item_index is not None:
             return f"item-{prog.item_index:04d}"
         return "single"
@@ -209,26 +215,33 @@ class DownloadList(ctk.CTkScrollableFrame):
         return row
 
     def update_from_progress(self, prog: DownloadProgress):
-        if prog.message == "all_done":
-            if not self._rows:
-                self._show_placeholder()
+        if not prog.job_id:
+            if prog.message == "all_done":
+                if not self._rows:
+                    self._show_placeholder()
+                    return
+                for row in self._rows.values():
+                    row.mark_complete("Complete")
                 return
-            for row in self._rows.values():
-                row.mark_complete("Complete")
-            return
+
+            if prog.status == "error":
+                for row in self._rows.values():
+                    row.mark_error()
+                    row.set_active(False)
+                return
+
+            if prog.status == "stopped":
+                self.mark_all_inactive()
+                return
 
         row = self._ensure_row(prog)
         if prog.status == "downloading":
-            for key, other_row in self._rows.items():
-                other_row.set_active(other_row is row)
-            if prog.item_index and prog.item_index > 1:
-                prev_key = f"item-{prog.item_index - 1:04d}"
-                prev_row = self._rows.get(prev_key)
-                if prev_row and prev_row is not row:
-                    prev_row.mark_complete("Complete")
-        row.update_progress(prog)
-        if prog.status in ("error", "stopped"):
+            row.set_active(True)
+        elif prog.status == "queued":
             row.set_active(False)
+        elif prog.status in ("error", "stopped", "finished"):
+            row.set_active(False)
+        row.update_progress(prog)
 
     def mark_all_inactive(self):
         for row in self._rows.values():
@@ -246,9 +259,8 @@ class App(ctk.CTk):
 
         ensure_ffmpeg_or_die(self)
 
-        # Threading
-        self.worker = None
-        self.stop_event = threading.Event()
+        # Threading / queue manager
+        self.manager = DownloadManager(self._enqueue_log, self._enqueue_progress, max_workers=3)
         self.log_queue = queue.Queue()
         self.progress_queue = queue.Queue()
         self.activity_history = []
@@ -256,6 +268,7 @@ class App(ctk.CTk):
         self.history_images: List[ctk.CTkImage] = []
         self.history_context_stack: List[Dict[str, object]] = []
         self._current_total_items: Optional[int] = None
+        self._cancel_requested = False
 
         # UI build
         self._build_ui()
@@ -725,21 +738,25 @@ class App(ctk.CTk):
         self._load_history_context(root_context)
         self._show_history_panel()
 
-    def _run_download_thread_with_bitrate(self, url, out_dir, bitrate):
-        downloader = YTAudioDownloader(self._enqueue_log, self._enqueue_progress, self.stop_event)
-        try:
-            downloader.download(url, out_dir, bitrate=bitrate)
-        finally:
-            self.after(0, lambda: self._set_ui_running(False))
-            self.after(0, self._update_status_finished)
+    def _start_audio_queue(self, url: str, out_dir: str, bitrate: str):
+        def runner():
+            try:
+                self.manager.start_audio(url, out_dir, bitrate)
+            except Exception as exc:  # pylint: disable=broad-except
+                self._enqueue_log(f"[{human_time()}] 💥 Failed to start audio download: {exc}")
+                self._enqueue_progress(DownloadProgress(status="error", message=str(exc)))
 
-    def _run_download_thread_video(self, url, out_dir, quality):
-        downloader = YTAudioDownloader(self._enqueue_log, self._enqueue_progress, self.stop_event)
-        try:
-            downloader.download_video(url, out_dir, quality=quality)
-        finally:
-            self.after(0, lambda: self._set_ui_running(False))
-            self.after(0, self._update_status_finished)
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _start_video_queue(self, url: str, out_dir: str, quality: str):
+        def runner():
+            try:
+                self.manager.start_video(url, out_dir, quality)
+            except Exception as exc:  # pylint: disable=broad-except
+                self._enqueue_log(f"[{human_time()}] 💥 Failed to start video download: {exc}")
+                self._enqueue_progress(DownloadProgress(status="error", message=str(exc)))
+
+        threading.Thread(target=runner, daemon=True).start()
 
 
 
@@ -757,10 +774,14 @@ class App(ctk.CTk):
             messagebox.showwarning("Missing Folder", "Please choose a destination folder.")
             return
 
+        if self.manager.has_active_jobs():
+            messagebox.showinfo("Busy", "Downloads are already running. Please wait.")
+            return
+
+        self._cancel_requested = False
         self._set_ui_running(True)
         self._clear_activity()
         self._log(f"[{human_time()}] 🚀 Starting download…")
-        self.stop_event.clear()
         self.download_list.reset()
         self.download_list.set_placeholder_text("Fetching data…", show=True)
         self._current_total_items = None
@@ -769,20 +790,10 @@ class App(ctk.CTk):
         if format_choice == "Audio":
             bitrate = AUDIO_QUALITIES.get(quality_choice, DEFAULT_BITRATE)
             self.status_var.set(f"Audio: {quality_choice}")
-            self.worker = threading.Thread(
-                target=self._run_download_thread_with_bitrate,
-                args=(url, out_dir, bitrate),
-                daemon=True,
-            )
+            self._start_audio_queue(url, out_dir, bitrate)
         else:
             self.status_var.set(f"Video: {quality_choice}")
-            self.worker = threading.Thread(
-                target=self._run_download_thread_video,
-                args=(url, out_dir, quality_choice),
-                daemon=True,
-            )
-
-        self.worker.start()
+            self._start_video_queue(url, out_dir, quality_choice)
 
 
 
@@ -805,8 +816,10 @@ class App(ctk.CTk):
 
 
     def _on_stop(self):
-        if self.worker and self.worker.is_alive():
-            self.stop_event.set()
+        if self.manager.has_active_jobs():
+            self._cancel_requested = True
+            self.manager.stop_all()
+            threading.Thread(target=self._wait_for_manager, daemon=True).start()
             self._log(f"[{human_time()}] ⏳ Stopping… please wait.")
             self.status_var.set("Stopping…")
 
@@ -823,13 +836,8 @@ class App(ctk.CTk):
     # ------------------------------------------------------------
     # Thread target
     # ------------------------------------------------------------
-    def _run_download_thread(self, url, out_dir):
-        downloader = YTAudioDownloader(self._enqueue_log, self._enqueue_progress, self.stop_event)
-        try:
-            downloader.download(url, out_dir, bitrate=DEFAULT_BITRATE)
-        finally:
-            self.after(0, lambda: self._set_ui_running(False))
-            self.after(0, self._update_status_finished)
+    def _wait_for_manager(self):
+        self.manager.wait_for_current_jobs()
 
     # ------------------------------------------------------------
     # Logging & progress
@@ -878,7 +886,7 @@ class App(ctk.CTk):
                 prog: DownloadProgress = self.progress_queue.get_nowait()
                 self.download_list.update_from_progress(prog)
 
-                if prog.item_count:
+                if prog.item_count and prog.job_id:
                     if self._current_total_items != prog.item_count:
                         self._current_total_items = prog.item_count
                         if prog.item_count > 1:
@@ -888,18 +896,28 @@ class App(ctk.CTk):
                 elif self._current_total_items is None and prog.title:
                     self.jobs_title_var.set("Single track")
 
-                if prog.status == "finished":
-                    if prog.message == "all_done":
+                if prog.job_id is None:
+                    if prog.item_count and prog.item_count > 1:
+                        self.jobs_title_var.set(f"Playlist • {prog.item_count} tracks")
+
+                    if prog.status == "finished" and prog.message == "all_done":
                         self.download_list.mark_all_inactive()
                         self.jobs_title_var.set("Download Completed")
                         if not self.download_list.has_rows():
                             self.download_list.set_placeholder_text("Download completed.", show=True)
-                elif prog.status in ("stopped", "error"):
-                    if prog.status == "stopped":
+                        self._on_downloads_complete("finished")
+                    elif prog.status == "stopped":
                         self.jobs_title_var.set("Stopped")
                         self.download_list.mark_all_inactive()
+                        self._on_downloads_complete("cancelled")
+                    elif prog.status == "error":
+                        self.jobs_title_var.set("Error during download")
+                        self._on_downloads_complete("error")
+                else:
                     if prog.status == "error":
                         self.jobs_title_var.set("Error during download")
+                    elif prog.status == "stopped" and not self._cancel_requested:
+                        self.jobs_title_var.set("Stopped item")
         except queue.Empty:
             pass
         finally:
@@ -921,12 +939,15 @@ class App(ctk.CTk):
                 self.start_btn.configure(text="Start", fg_color=ACCENT, hover_color="#00e0a0")
 
 
-    def _update_status_finished(self):
-        """Update footer and restore Start button after job end or stop."""
-        if self.stop_event.is_set():
-            self.status_var.set("Stopped.") 
-        else:
+    def _on_downloads_complete(self, result: str):
+        """Restore UI after the queue finishes."""
+        self._cancel_requested = result == "cancelled"
+        self._set_ui_running(False)
+        if result == "finished":
             self.status_var.set("Done.")
-        # Always reset button to Start when work completes
+        elif result == "error":
+            self.status_var.set("Error.")
+        else:
+            self.status_var.set("Stopped.")
         self.start_btn.configure(text="Start", fg_color=ACCENT, hover_color="#00e0a0")
 
