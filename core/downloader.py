@@ -127,7 +127,8 @@ class YTAudioDownloader:
             "writethumbnail": True,
             "embedthumbnail": True,
             "addmetadata": True,
-            "ignoreerrors": True,
+            # Do not ignore errors so they surface in the UI instead of reporting
+            # a successful download despite failures.
             "retries": 10,
             "continuedl": True,
             "noprogress": True,
@@ -215,7 +216,7 @@ class YTAudioDownloader:
             "outtmpl": outtmpl,
             "format": f"bestvideo[height<={height}]+bestaudio/best",
             "merge_output_format": "mp4",
-            "ignoreerrors": True,
+            # Surface errors to the caller so the UI can react appropriately.
             "retries": 10,
             "continuedl": True,
             "noprogress": True,
